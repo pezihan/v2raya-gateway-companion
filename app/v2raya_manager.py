@@ -1,7 +1,9 @@
 import os
 import re
 import time
+import json
 import sqlite3
+import urllib.request
 import httpx
 from typing import List, Dict, Optional, Set, Tuple
 from app.config import settings
@@ -59,11 +61,92 @@ class V2RayAManager:
         self.v2raya_url = settings.V2RAYA_URL.rstrip('/')
         self._last_mtimes: Dict[str, float] = {}
         self._cached_content: Optional[str] = None
+        self._v2raya_token: Optional[str] = None
+        self._v2raya_token_exp: float = 0
         os.makedirs(os.path.dirname(self.backup_path) or ".", exist_ok=True)
         if not os.path.exists(self.backup_path):
             with open(self.backup_path, "w", encoding="utf-8") as f:
                 f.write(DEFAULT_ROUTINGA_TEMPLATE)
         self._update_recorded_mtimes()
+
+    def _extract_v2raya_username(self) -> str:
+        """Extracts username from /etc/v2raya/bolt.db accounts bucket or fallback"""
+        for path in ["/etc/v2raya/bolt.db", "/etc/v2raya/boltv4.db"]:
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as f:
+                        raw = f.read()
+                    idx = raw.find(b"accounts")
+                    if idx != -1:
+                        m = re.search(rb'([a-zA-Z0-9_-]{3,30})"[a-f0-9]{32}"', raw[idx:idx+400])
+                        if m:
+                            return m.group(1).decode("utf-8")
+                except Exception:
+                    pass
+        return os.getenv("V2RAYA_USER", "pezihan")
+
+    def _get_v2raya_token(self) -> Optional[str]:
+        """Logs into v2rayA REST API using detected credentials and returns JWT token"""
+        now = time.time()
+        if self._v2raya_token and self._v2raya_token_exp > now + 60:
+            return self._v2raya_token
+
+        username = self._extract_v2raya_username()
+        password = getattr(settings, "AUTH_PASSWORD", "433127")
+        try:
+            url = f"{self.v2raya_url}/api/login"
+            req = urllib.request.Request(
+                url,
+                data=json.dumps({"username": username, "password": password}).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("code") == "SUCCESS" and data.get("data", {}).get("token"):
+                    self._v2raya_token = data["data"]["token"]
+                    self._v2raya_token_exp = now + 7200
+                    return self._v2raya_token
+        except Exception:
+            pass
+        return None
+
+    def _read_via_v2raya_api(self) -> Optional[str]:
+        """Reads RoutingA directly from v2rayA official REST API"""
+        token = self._get_v2raya_token()
+        if not token:
+            return None
+        try:
+            url = f"{self.v2raya_url}/api/routingA"
+            req = urllib.request.Request(url, headers={"Authorization": token})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("code") == "SUCCESS":
+                    val = data.get("data", {}).get("routingA", "")
+                    if val and "default:" in val and "->" in val:
+                        return val
+        except Exception:
+            pass
+        return None
+
+    def _save_via_v2raya_api(self, content: str) -> bool:
+        """Saves RoutingA directly to v2rayA official REST API (updates DB and applies routing)"""
+        token = self._get_v2raya_token()
+        if not token:
+            return False
+        try:
+            url = f"{self.v2raya_url}/api/routingA"
+            req = urllib.request.Request(
+                url,
+                data=json.dumps({"routingA": content}).encode("utf-8"),
+                headers={"Authorization": token, "Content-Type": "application/json"},
+                method="PUT"
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data.get("code") == "SUCCESS"
+        except Exception as e:
+            print(f"[v2rayA API PUT error] {e}")
+            return False
 
     def _get_candidate_paths(self) -> List[str]:
         candidates = [
@@ -112,7 +195,7 @@ class V2RayAManager:
 
         if current_mtimes != self._last_mtimes:
             self._last_mtimes = current_mtimes
-            new_content = self._read_from_sqlite()
+            new_content = self._read_via_v2raya_api() or self._read_from_sqlite()
             if new_content and new_content != self._cached_content:
                 self._cached_content = new_content
                 with open(self.backup_path, "w", encoding="utf-8") as f:
@@ -162,16 +245,39 @@ class V2RayAManager:
             return None
         try:
             with open(file_path, "rb") as f:
-                raw_bytes = f.read()
-            text = raw_bytes.decode('utf-8', errors='ignore')
+                data = f.read()
+
+            # Method A: Locate json-encoded string routingA"..." in BoltDB
+            indices = []
+            idx = 0
+            while True:
+                pos = data.find(b'routingA"', idx)
+                if pos == -1:
+                    break
+                indices.append(pos)
+                idx = pos + 1
+
+            decoder = json.JSONDecoder()
+            for pos in reversed(indices):
+                start_quote = pos + len(b'routingA')
+                try:
+                    text = data[start_quote:].decode('utf-8', errors='ignore')
+                    val, _ = decoder.raw_decode(text)
+                    if isinstance(val, str) and 'default:' in val and '->' in val:
+                        return val
+                except Exception:
+                    continue
+
+            # Method B: Regex fallback
+            text = data.decode('utf-8', errors='ignore')
             matches = re.findall(r'((?:#.*\n|default:\s*(?:direct|proxy|block)\n|(?:domain|ip)\([^)]+\)\s*->\s*(?:proxy|direct|block)\n|\s*\n){4,})', text)
             for m in matches:
                 if 'domain(' in m and ('-> proxy' in m or '-> direct' in m):
                     cleaned = m.strip()
                     if len(cleaned) > 50:
                         return cleaned
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Binary extraction error] {e}")
         return None
 
     def _read_from_sqlite(self) -> Optional[str]:
@@ -258,7 +364,10 @@ class V2RayAManager:
 
     def get_sync_status(self) -> Dict:
         """Returns storage mode, found files, and v2raya connection status"""
+        has_bolt = os.path.exists("/etc/v2raya/bolt.db")
         db_exists = os.path.exists(self.db_path)
+        token = self._get_v2raya_token()
+        has_api = bool(token)
         found_files = []
         v2raya_dir = os.path.dirname(self.db_path)
         if os.path.exists(v2raya_dir):
@@ -266,47 +375,82 @@ class V2RayAManager:
                 found_files = os.listdir(v2raya_dir)
             except Exception:
                 pass
+
+        if has_api:
+            storage_mode = "v2rayA 原生 API 直连模式 (自动热生效)"
+        elif has_bolt or db_exists or found_files:
+            storage_mode = "BoltDB 数据库直读同步模式"
+        else:
+            storage_mode = "本地备份模式"
+
         return {
-            "db_path": self.db_path,
-            "db_connected": db_exists,
+            "db_path": "/etc/v2raya/bolt.db" if has_bolt else self.db_path,
+            "db_connected": has_api or has_bolt or db_exists,
             "found_files": found_files,
             "backup_path": self.backup_path,
-            "storage_mode": "实时数据库双向同步" if (db_exists or found_files) else "本地配置模式"
+            "storage_mode": storage_mode
         }
 
     def force_sync_from_v2raya(self) -> Dict:
-        """Forces a re-scan of v2rayA database to pull latest changes made in v2rayA UI"""
-        content = self._read_from_sqlite()
+        """Forces a re-scan of v2rayA API / database to pull latest changes made in v2rayA UI"""
+        content = self._read_via_v2raya_api() or self._read_from_sqlite()
         self._update_recorded_mtimes()
         if content:
             self._cached_content = content
             with open(self.backup_path, "w", encoding="utf-8") as f:
                 f.write(content)
-            return {"success": True, "source": "v2rayA 数据库", "length": len(content)}
-        return {"success": False, "message": "未在 /etc/v2raya 中探测到可读数据库，已保持现有配置"}
+            source = "v2rayA 原生 API" if self._v2raya_token else "v2rayA 数据库"
+            return {"success": True, "source": source, "length": len(content)}
+        return {"success": False, "message": "未在 /etc/v2raya 中探测到可读数据库或 API，已保持现有配置"}
 
     def get_raw_routinga(self) -> str:
         """Gets current raw RoutingA configuration string"""
+        # Priority 1: Official v2rayA API
+        api_content = self._read_via_v2raya_api()
+        if api_content:
+            self._cached_content = api_content
+            try:
+                with open(self.backup_path, "w", encoding="utf-8") as f:
+                    f.write(api_content)
+            except Exception:
+                pass
+            return api_content
+
+        # Priority 2: Database candidate files (BoltDB / SQLite)
         content = self._read_from_sqlite()
         if content:
             self._cached_content = content
+            try:
+                with open(self.backup_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception:
+                pass
             return content
+
+        # Priority 3: Local backup file
         if os.path.exists(self.backup_path):
             with open(self.backup_path, "r", encoding="utf-8") as f:
                 content = f.read()
-                self._cached_content = content
-                return content
+                if content.strip():
+                    self._cached_content = content
+                    return content
+
         self._cached_content = DEFAULT_ROUTINGA_TEMPLATE
         return DEFAULT_ROUTINGA_TEMPLATE
 
     def save_raw_routinga(self, content: str) -> bool:
-        """Saves raw RoutingA string to DB & file"""
+        """Saves raw RoutingA string to API, DB & file"""
         self._cached_content = content
         # Save to backup file
         with open(self.backup_path, "w", encoding="utf-8") as f:
             f.write(content)
-        # Save to SQLite
+
+        # Priority 1: Save via official v2rayA API (which writes to BoltDB and reloads core!)
+        self._save_via_v2raya_api(content)
+
+        # Priority 2: SQLite write if SQLite exists
         self._save_to_sqlite(content)
+
         # Update recorded mtimes so our own write doesn't trigger false external detection
         self._update_recorded_mtimes()
         return True

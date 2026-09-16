@@ -7,3 +7,4 @@ scapy>=2.5.0
 aiosqlite>=0.20.0
 python-multipart>=0.0.9
 psutil>=5.9.8
+websockets>=12.0
