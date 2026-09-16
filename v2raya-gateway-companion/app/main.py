@@ -60,6 +60,13 @@ class AddRuleRequest(BaseModel):
     match_type: str = "domain" # domain, full
     category: str = "自定义代理"
 
+class UpdateRuleRequest(BaseModel):
+    old_target: str
+    new_target: str
+    new_match_type: str = "domain"
+    new_action: str = "proxy"
+    new_category: Optional[str] = None
+
 class RawRuleRequest(BaseModel):
     content: str
 
@@ -75,9 +82,11 @@ class SimulateTrafficRequest(BaseModel):
 
 @app.get("/api/status")
 async def get_system_status():
+    storage_info = v2raya_manager.get_sync_status()
     return {
         "status": "online",
         "v2raya_url": settings.V2RAYA_URL,
+        "storage": storage_info,
         "sniffer": sniffer.get_status(),
         "total_rules": len(v2raya_manager.parse_rules())
     }
@@ -98,8 +107,6 @@ async def api_check_domain(req: CheckDomainRequest):
         
     analysis = analyze_domain(domain)
     probe_result = await prober.check_domain(domain, req.force_refresh)
-    
-    # Check if currently proxied
     is_proxied = v2raya_manager.is_domain_proxied(domain)
     
     return {
@@ -112,7 +119,9 @@ async def api_check_domain(req: CheckDomainRequest):
 async def get_rules():
     return {
         "rules": v2raya_manager.parse_rules(),
-        "raw": v2raya_manager.get_raw_routinga()
+        "raw": v2raya_manager.get_raw_routinga(),
+        "audit": v2raya_manager.audit_rules(),
+        "storage": v2raya_manager.get_sync_status()
     }
 
 @app.post("/api/rules/add")
@@ -128,7 +137,6 @@ async def add_rule(req: AddRuleRequest):
         category=req.category
     )
     
-    # Notify WebSocket clients
     await ws_manager.broadcast({
         "type": "RULES_UPDATED",
         "domain": domain,
@@ -141,11 +149,37 @@ async def add_rule(req: AddRuleRequest):
         "rule": format_routinga_rule(domain, req.action, req.match_type)
     }
 
+@app.post("/api/rules/update")
+async def update_rule(req: UpdateRuleRequest):
+    new_domain = extract_domain(req.new_target)
+    if not new_domain:
+        raise HTTPException(status_code=400, detail="新域名格式无效")
+        
+    success = v2raya_manager.update_rule(
+        old_target=req.old_target,
+        new_target=new_domain,
+        new_match_type=req.new_match_type,
+        new_action=req.new_action,
+        new_category=req.new_category
+    )
+    await ws_manager.broadcast({"type": "RULES_UPDATED"})
+    return {"success": success, "new_domain": new_domain}
+
 @app.delete("/api/rules")
 async def delete_rule(target: str):
     success = v2raya_manager.delete_rule_by_target(target)
     await ws_manager.broadcast({"type": "RULES_UPDATED"})
     return {"success": success}
+
+@app.get("/api/rules/audit")
+async def audit_rules():
+    return v2raya_manager.audit_rules()
+
+@app.post("/api/rules/auto-fix")
+async def auto_fix_rules():
+    result = v2raya_manager.auto_fix_rules()
+    await ws_manager.broadcast({"type": "RULES_UPDATED"})
+    return result
 
 @app.post("/api/rules/optimize")
 async def optimize_rules():
@@ -195,7 +229,6 @@ async def clear_alerts():
 
 @app.post("/api/monitor/simulate")
 async def simulate_traffic(req: SimulateTrafficRequest):
-    """Simulates an incoming request from the target IP for demonstration/verification"""
     domain = extract_domain(req.domain)
     if not domain:
         raise HTTPException(status_code=400, detail="Invalid domain")
@@ -209,12 +242,10 @@ async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)
     try:
         while True:
-            # Keep-alive heartbeat
             data = await websocket.receive_text()
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
 
-# Serve static frontend
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/")

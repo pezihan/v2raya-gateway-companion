@@ -2,11 +2,12 @@ const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
 
 createApp({
   setup() {
-    const currentTab = ref('sniffer');
+    const currentTab = ref('rules'); // default to rules tab so user immediately sees management
     const targetIp = ref('');
     const lanDevices = ref([]);
     const monitorStatus = ref({ is_running: false, elapsed_seconds: 0 });
     const alerts = ref([]);
+    const storageInfo = ref({});
     
     // Manual tab
     const manualInput = ref('');
@@ -20,6 +21,19 @@ createApp({
     const rawContent = ref('');
     const showRawEditor = ref(false);
     const searchQuery = ref('');
+    const ruleAudit = ref({ total_issues: 0, issues: [] });
+
+    // Modal state for Add / Edit
+    const modal = ref({
+      show: false,
+      isEdit: false,
+      oldTarget: '',
+      target: '',
+      match_type: 'domain',
+      action: 'proxy',
+      category: '自定义代理',
+      suggestedRoot: null
+    });
 
     // Toast
     const toast = ref({ show: false, message: '', type: 'success' });
@@ -69,8 +83,10 @@ createApp({
 
     const fetchStatus = async () => {
       try {
-        const res = await fetch('/api/monitor/status');
-        monitorStatus.value = await res.json();
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        storageInfo.value = data.storage || {};
+        monitorStatus.value = data.sniffer || {};
       } catch (e) {}
     };
 
@@ -87,7 +103,150 @@ createApp({
         const data = await res.json();
         rules.value = data.rules || [];
         rawContent.value = data.raw || '';
+        ruleAudit.value = data.audit || { total_issues: 0, issues: [] };
+        if (data.storage) {
+          storageInfo.value = data.storage;
+        }
       } catch (e) {}
+    };
+
+    // Modal Operations (Add / Edit)
+    const openAddModal = () => {
+      modal.value = {
+        show: true,
+        isEdit: false,
+        oldTarget: '',
+        target: '',
+        match_type: 'domain',
+        action: 'proxy',
+        category: '自定义代理',
+        suggestedRoot: null
+      };
+    };
+
+    const openEditModal = (rule) => {
+      modal.value = {
+        show: true,
+        isEdit: true,
+        oldTarget: rule.target,
+        target: rule.target,
+        match_type: rule.match_type || 'domain',
+        action: rule.action || 'proxy',
+        category: rule.category || '自定义代理',
+        suggestedRoot: rule.has_www ? rule.suggested_root : null
+      };
+    };
+
+    let modalInputTimer = null;
+    const onModalTargetInput = () => {
+      clearTimeout(modalInputTimer);
+      modalInputTimer = setTimeout(async () => {
+        const text = modal.value.target.trim();
+        if (!text) {
+          modal.value.suggestedRoot = null;
+          return;
+        }
+        try {
+          const res = await fetch('/api/domain/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: text })
+          });
+          const data = await res.json();
+          if (data.success) {
+            if (data.is_subdomain && data.suggested_root) {
+              modal.value.suggestedRoot = data.suggested_root;
+            } else {
+              modal.value.suggestedRoot = null;
+            }
+          }
+        } catch (e) {}
+      }, 300);
+    };
+
+    const submitModal = async () => {
+      if (!modal.value.target.trim()) {
+        showToast('请输入域名', 'error');
+        return;
+      }
+      try {
+        if (modal.value.isEdit) {
+          // Update existing rule
+          const res = await fetch('/api/rules/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              old_target: modal.value.oldTarget,
+              new_target: modal.value.target,
+              new_match_type: modal.value.match_type,
+              new_action: modal.value.action,
+              new_category: modal.value.category
+            })
+          });
+          const data = await res.json();
+          if (data.success) {
+            showToast(`已成功修改规则并写回 v2rayA: ${data.new_domain}`);
+            modal.value.show = false;
+            fetchRules();
+          }
+        } else {
+          // Add new rule
+          const res = await fetch('/api/rules/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              domain: modal.value.target,
+              action: modal.value.action,
+              match_type: modal.value.match_type,
+              category: modal.value.category
+            })
+          });
+          const data = await res.json();
+          if (data.success) {
+            showToast(`已成功写入 v2rayA: ${data.domain}`);
+            modal.value.show = false;
+            fetchRules();
+          }
+        }
+      } catch (e) {
+        showToast('保存规则失败', 'error');
+      }
+    };
+
+    const cycleRuleAction = async (rule) => {
+      const actions = ['proxy', 'direct', 'block'];
+      const nextAction = actions[(actions.indexOf(rule.action) + 1) % actions.length];
+      try {
+        const res = await fetch('/api/rules/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            old_target: rule.target,
+            new_target: rule.target,
+            new_match_type: rule.match_type,
+            new_action: nextAction,
+            new_category: rule.category
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          rule.action = nextAction;
+          showToast(`已将 ${rule.target} 切换为: ${nextAction.toUpperCase()}`);
+        }
+      } catch (e) {
+        showToast('切换动作失败', 'error');
+      }
+    };
+
+    const autoFixRules = async () => {
+      try {
+        const res = await fetch('/api/rules/auto-fix', { method: 'POST' });
+        const data = await res.json();
+        showToast(`⚡ 自动修复完成！去除了 ${data.modified_www_count} 处 www 前缀，清除了 ${data.cleaned_redundant_count} 处重复冗余`);
+        fetchRules();
+      } catch (e) {
+        showToast('修复失败', 'error');
+      }
     };
 
     // Sniffer Controls
@@ -215,7 +374,7 @@ createApp({
         });
         const data = await res.json();
         if (data.success) {
-          showToast(`已成功添加规则并同步到 v2rayA: ${domain}`);
+          showToast(`已成功写入 v2rayA: ${domain}`);
           fetchRules();
         }
       } catch (e) {
@@ -224,7 +383,7 @@ createApp({
     };
 
     const deleteRule = async (target) => {
-      if (!confirm(`确定要从 RoutingA 中删除 ${target} 吗？`)) return;
+      if (!confirm(`确定要从 v2rayA 中删除规则 ${target} 吗？`)) return;
       try {
         await fetch(`/api/rules?target=${encodeURIComponent(target)}`, { method: 'DELETE' });
         showToast(`已删除: ${target}`);
@@ -303,6 +462,7 @@ createApp({
       lanDevices,
       monitorStatus,
       alerts,
+      storageInfo,
       manualInput,
       manualAnalysis,
       manualProbe,
@@ -313,7 +473,15 @@ createApp({
       showRawEditor,
       searchQuery,
       groupedRules,
+      ruleAudit,
+      modal,
       toast,
+      openAddModal,
+      openEditModal,
+      onModalTargetInput,
+      submitModal,
+      cycleRuleAction,
+      autoFixRules,
       startMonitoring,
       stopMonitoring,
       clearAlerts,

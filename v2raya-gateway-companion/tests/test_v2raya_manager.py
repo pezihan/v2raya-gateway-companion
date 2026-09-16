@@ -73,3 +73,48 @@ def test_optimize_redundant_rules(tmp_path):
     res = mgr.optimize_rules()
     assert res["success"] is True
     assert res["cleaned_count"] >= 1
+
+def test_update_rule(tmp_path):
+    conf_file = tmp_path / "routinga.conf"
+    conf_file.write_text(SAMPLE_ROUTINGA, encoding="utf-8")
+    
+    mgr = V2RayAManager()
+    mgr.backup_path = str(conf_file)
+    mgr.db_path = "/nonexistent/path/db.sqlite"
+    
+    # Update www.pornhub.com to pornhub.com
+    res = mgr.update_rule(
+        old_target="www.pornhub.com",
+        new_target="pornhub.com",
+        new_match_type="domain",
+        new_action="proxy"
+    )
+    assert res is True
+    
+    updated_rules = mgr.parse_rules()
+    targets = [r["target"] for r in updated_rules]
+    assert "pornhub.com" in targets
+    assert "www.pornhub.com" not in targets
+
+def test_audit_and_auto_fix(tmp_path):
+    conf_file = tmp_path / "routinga.conf"
+    conf_file.write_text(SAMPLE_ROUTINGA, encoding="utf-8")
+    
+    mgr = V2RayAManager()
+    mgr.backup_path = str(conf_file)
+    mgr.db_path = "/nonexistent/path/db.sqlite"
+    
+    # Check audit issues
+    audit = mgr.audit_rules()
+    assert audit["total_issues"] >= 2  # Has redundant full and www.pornhub.com
+    
+    # Execute auto fix
+    fix_res = mgr.auto_fix_rules()
+    assert fix_res["success"] is True
+    assert fix_res["total_fixed"] >= 2
+    
+    # Verify fixed content
+    fixed_rules = mgr.parse_rules()
+    targets = [r["target"] for r in fixed_rules]
+    assert "pornhub.com" in targets
+    assert "www.pornhub.com" not in targets
