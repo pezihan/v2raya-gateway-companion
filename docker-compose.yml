@@ -15,6 +15,7 @@ services:
       # 挂载宿主机 v2rayA 的配置目录
       - /etc/v2raya:/etc/v2raya
       - ./data:/app/data
+      - ./app:/app/app
     environment:
       - HOST=0.0.0.0
       - PORT=2018
