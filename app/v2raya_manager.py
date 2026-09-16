@@ -26,12 +26,30 @@ domain(full:mail.qq.com) -> direct
 # ===============================================
 
 # Telegram
+domain(full:telegram.org) -> proxy
 domain(domain:telegram.org) -> proxy
+domain(full:web.telegram.org) -> proxy
+domain(domain:web.telegram.org) -> proxy
+domain(full:telegram.me) -> proxy
 domain(domain:telegram.me) -> proxy
+domain(full:t.me) -> proxy
 domain(domain:t.me) -> proxy
-domain(domain:telegram.dog) -> proxy
+domain(full:telegram.dog) -> proxy
 
-# 自定义代理
+# 其他自定义域名
+domain(domain:gpt.eacase.de5.net) -> proxy
+domain(domain:jisuai.top) -> proxy
+domain(domain:makerworld.com) -> proxy
+domain(domain:91porna.com) -> proxy
+domain(domain:www.pornhub.com) -> proxy
+domain(domain:fangsung.com) -> proxy
+domain(domain:1808.online) -> proxy
+domain(domain:avgood.com) -> proxy
+domain(domain:qingse.one) -> proxy
+domain(domain:51cg1.com) -> proxy
+domain(domain:missav.live) -> proxy
+domain(domain:app.lemonsqueezy.com) -> proxy
+domain(domain:lemonsqueezy.com) -> proxy
 """
 
 class V2RayAManager:
@@ -80,27 +98,71 @@ class V2RayAManager:
             pass
         return None
 
-    def _read_from_sqlite(self) -> Optional[str]:
-        """Attempts to read RoutingA text directly from v2rayA SQLite DB"""
-        if not os.path.exists(self.db_path):
+    def _extract_routinga_from_binary(self, file_path: str) -> Optional[str]:
+        """Extracts RoutingA block from BoltDB (bolt.db/boltv4.db) or binary files"""
+        if not os.path.exists(file_path):
             return None
         try:
-            conn = sqlite3.connect(self.db_path)
-            target = self._locate_db_target(conn)
-            if target:
-                table, key_col, val_col, key_val = target
-                cursor = conn.cursor()
-                if key_col == "rowid":
-                    cursor.execute(f"SELECT {val_col} FROM {table} LIMIT 1")
-                else:
-                    cursor.execute(f"SELECT {val_col} FROM {table} WHERE {key_col} = ? LIMIT 1", (key_val,))
-                row = cursor.fetchone()
+            with open(file_path, "rb") as f:
+                raw_bytes = f.read()
+            text = raw_bytes.decode('utf-8', errors='ignore')
+            matches = re.findall(r'((?:#.*\n|default:\s*(?:direct|proxy|block)\n|(?:domain|ip)\([^)]+\)\s*->\s*(?:proxy|direct|block)\n|\s*\n){4,})', text)
+            for m in matches:
+                if 'domain(' in m and ('-> proxy' in m or '-> direct' in m):
+                    cleaned = m.strip()
+                    if len(cleaned) > 50:
+                        return cleaned
+        except Exception:
+            pass
+        return None
+
+    def _read_from_sqlite(self) -> Optional[str]:
+        """Attempts to read RoutingA text from SQLite or BoltDB in /etc/v2raya"""
+        candidates = [
+            self.db_path,
+            "/etc/v2raya/bolt.db",
+            "/etc/v2raya/boltv4.db",
+            "/root/.config/v2raya/v2raya.db"
+        ]
+        
+        # If directory exists, inspect all files in /etc/v2raya
+        v2raya_dir = os.path.dirname(self.db_path)
+        if os.path.exists(v2raya_dir):
+            try:
+                for f in os.listdir(v2raya_dir):
+                    fp = os.path.join(v2raya_dir, f)
+                    if fp not in candidates and os.path.isfile(fp):
+                        candidates.append(fp)
+            except Exception:
+                pass
+
+        for path in candidates:
+            if not os.path.exists(path):
+                continue
+            # Try 1: SQLite query
+            try:
+                conn = sqlite3.connect(path)
+                target = self._locate_db_target(conn)
+                if target:
+                    table, key_col, val_col, key_val = target
+                    cursor = conn.cursor()
+                    if key_col == "rowid":
+                        cursor.execute(f"SELECT {val_col} FROM {table} LIMIT 1")
+                    else:
+                        cursor.execute(f"SELECT {val_col} FROM {table} WHERE {key_col} = ? LIMIT 1", (key_val,))
+                    row = cursor.fetchone()
+                    conn.close()
+                    if row and row[0] and len(row[0]) > 20:
+                        return row[0]
                 conn.close()
-                if row and row[0]:
-                    return row[0]
-            conn.close()
-        except Exception as e:
-            print(f"[DB Read Error] {e}")
+            except Exception:
+                pass
+
+            # Try 2: Binary database / BoltDB text extraction
+            binary_res = self._extract_routinga_from_binary(path)
+            if binary_res:
+                return binary_res
+
         return None
 
     def _save_to_sqlite(self, content: str) -> bool:
