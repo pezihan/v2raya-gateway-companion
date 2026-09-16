@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  v2raya-companion:
+    build: .
+    container_name: v2raya-companion
+    restart: unless-stopped
+    # 核心：使用 host 网络模式，以便嗅探网关上局域网客户端的真实流量，并直接与宿主机 v2rayA 通信
+    network_mode: "host"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      # 挂载宿主机 v2rayA 的配置目录
+      - /etc/v2raya:/etc/v2raya
+      - ./data:/app/data
+    environment:
+      - HOST=0.0.0.0
+      - PORT=2018
+      - V2RAYA_URL=http://127.0.0.1:2017
+      - V2RAYA_DB_PATH=/etc/v2raya/v2raya.db
+      - DOMESTIC_DNS=223.5.5.5
+      - OVERSEAS_DOH=https://1.1.1.1/dns-query
