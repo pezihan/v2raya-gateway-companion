@@ -34,12 +34,10 @@
 
 ### 方式一：Docker Compose 一键启动（推荐）
 
-1. 将本项目目录复制到你的 Linux 网关机器上：
+1. 直接在项目根目录启动容器：
    ```bash
-   cd v2raya-gateway-companion
+   docker compose up -d --build
    ```
-
-2. 检查 `docker-compose.yml`：
    > **注意**：容器采用 `network_mode: "host"`，这是抓取网关底层局域网数据包并直接与宿主机 `127.0.0.1:2017` 的 v2rayA 通信的必需配置。同时挂载了宿主机的 `/etc/v2raya` 目录用于读取和同步规则。
 
 3. 启动容器：
