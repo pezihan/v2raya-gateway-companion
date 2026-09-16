@@ -199,14 +199,31 @@ class V2RayAManager:
             return False
 
     def get_sync_status(self) -> Dict:
-        """Returns storage mode and v2raya connection status"""
+        """Returns storage mode, found files, and v2raya connection status"""
         db_exists = os.path.exists(self.db_path)
+        found_files = []
+        v2raya_dir = os.path.dirname(self.db_path)
+        if os.path.exists(v2raya_dir):
+            try:
+                found_files = os.listdir(v2raya_dir)
+            except Exception:
+                pass
         return {
             "db_path": self.db_path,
             "db_connected": db_exists,
+            "found_files": found_files,
             "backup_path": self.backup_path,
-            "storage_mode": "SQLite 直接写回 (v2rayA 数据库)" if db_exists else "独立配置文件模式"
+            "storage_mode": "实时数据库双向同步" if (db_exists or found_files) else "本地配置模式"
         }
+
+    def force_sync_from_v2raya(self) -> Dict:
+        """Forces a re-scan of v2rayA database to pull latest changes made in v2rayA UI"""
+        content = self._read_from_sqlite()
+        if content:
+            with open(self.backup_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {"success": True, "source": "v2rayA 数据库", "length": len(content)}
+        return {"success": False, "message": "未在 /etc/v2raya 中探测到可读数据库，已保持现有配置"}
 
     def get_raw_routinga(self) -> str:
         """Gets current raw RoutingA configuration string"""

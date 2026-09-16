@@ -202,6 +202,12 @@ async def save_raw_rules(req: RawRuleRequest):
     await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
     return {"success": success, "reload": reload_res}
 
+@app.post("/api/rules/sync")
+async def sync_from_v2raya():
+    result = v2raya_manager.force_sync_from_v2raya()
+    await ws_manager.broadcast({"type": "RULES_UPDATED"})
+    return result
+
 @app.post("/api/v2ray/reload")
 async def reload_v2ray():
     result = await v2raya_manager.reload_v2raya()

@@ -428,6 +428,21 @@ createApp({
       }
     };
 
+    const syncFromV2rayA = async () => {
+      try {
+        const res = await fetch('/api/rules/sync', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showToast('已成功从 v2rayA 数据库同步最新配置！');
+          fetchRules();
+        } else {
+          showToast(data.message || '未在数据库中检测到变更，已保留现有规则');
+        }
+      } catch (e) {
+        showToast('同步失败', 'error');
+      }
+    };
+
     // Group rules by category
     const groupedRules = computed(() => {
       const q = searchQuery.value.toLowerCase().trim();
@@ -505,6 +520,7 @@ createApp({
       optimizeRules,
       saveRawRules,
       triggerReload,
+      syncFromV2rayA,
       formatTime
     };
   }

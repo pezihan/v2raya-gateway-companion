@@ -339,6 +339,14 @@
               <span>立即重载生效</span>
             </button>
 
+            <!-- Sync from v2rayA Button -->
+            <button @click="syncFromV2rayA" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-medium transition-all flex items-center space-x-1" title="从宿主机 v2rayA 重新拉取最新规则">
+              <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+              <span>从 v2rayA 同步</span>
+            </button>
+
             <!-- Toggle Raw Editor -->
             <button @click="showRawEditor = !showRawEditor" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-all">
               {{ showRawEditor ? '切换为卡片视图' : '纯文本' }}
