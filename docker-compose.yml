@@ -1,8 +1,9 @@
-version: '3.8'
-
 services:
   v2raya-companion:
-    build: .
+    build:
+      context: .
+      args:
+        BASE_IMAGE: docker.m.daocloud.io/library/python:3.11-slim
     container_name: v2raya-companion
     restart: unless-stopped
     # 核心：使用 host 网络模式，以便嗅探网关上局域网客户端的真实流量，并直接与宿主机 v2rayA 通信
