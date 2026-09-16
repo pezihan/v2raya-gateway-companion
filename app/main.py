@@ -38,10 +38,10 @@ class ConnectionManager:
 ws_manager = ConnectionManager()
 
 async def v2raya_auto_sync_loop():
-    """Background task checking for external v2rayA rule changes every 4 seconds"""
+    """Background task checking for external v2rayA rule changes periodically (default every 60 seconds)"""
     while True:
         try:
-            await asyncio.sleep(4)
+            await asyncio.sleep(settings.SYNC_INTERVAL)
             if v2raya_manager.check_for_external_changes():
                 await ws_manager.broadcast({
                     "type": "RULES_UPDATED",
@@ -50,7 +50,7 @@ async def v2raya_auto_sync_loop():
         except asyncio.CancelledError:
             break
         except Exception:
-            await asyncio.sleep(4)
+            await asyncio.sleep(settings.SYNC_INTERVAL)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

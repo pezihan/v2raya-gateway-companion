@@ -31,6 +31,7 @@ class Settings(BaseModel):
     V2RAYA_URL: str = os.getenv("V2RAYA_URL", "http://127.0.0.1:2017")
     V2RAYA_DB_PATH: str = os.getenv("V2RAYA_DB_PATH", "/etc/v2raya/v2raya.db")
     ROUTINGA_BACKUP_PATH: str = os.getenv("ROUTINGA_BACKUP_PATH", "./data/routinga.conf")
+    SYNC_INTERVAL: int = int(os.getenv("SYNC_INTERVAL", "60"))  # Background auto-sync interval in seconds (default: 60s)
     
     # GFW Probing settings
     DOMESTIC_DNS: str = os.getenv("DOMESTIC_DNS", "223.5.5.5")
