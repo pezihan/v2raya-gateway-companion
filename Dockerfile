@@ -7,11 +7,13 @@ WORKDIR /app
 RUN (sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
      sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list 2>/dev/null || true)
 
-# Install system dependencies for network capturing
+# 安装系统依赖（同时兼容 libpcap0.8 与 Debian 13/trixie 的 libpcap0.8t64，并安装编译工具适配 armhf）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpcap0.8 \
     iproute2 \
     curl \
+    gcc \
+    python3-dev \
+    && (apt-get install -y --no-install-recommends libpcap0.8t64 2>/dev/null || apt-get install -y --no-install-recommends libpcap0.8 2>/dev/null || true) \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
