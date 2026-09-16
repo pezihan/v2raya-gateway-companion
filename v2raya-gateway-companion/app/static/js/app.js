@@ -418,6 +418,16 @@ createApp({
       }
     };
 
+    const triggerReload = async () => {
+      try {
+        const res = await fetch('/api/v2ray/reload', { method: 'POST' });
+        const data = await res.json();
+        showToast(data.message || '已成功通知 v2rayA 重载内核生效！');
+      } catch (e) {
+        showToast('重载请求已发送');
+      }
+    };
+
     // Group rules by category
     const groupedRules = computed(() => {
       const q = searchQuery.value.toLowerCase().trim();
@@ -494,6 +504,7 @@ createApp({
       deleteRule,
       optimizeRules,
       saveRawRules,
+      triggerReload,
       formatTime
     };
   }

@@ -137,16 +137,20 @@ async def add_rule(req: AddRuleRequest):
         category=req.category
     )
     
+    reload_res = await v2raya_manager.reload_v2raya()
+    
     await ws_manager.broadcast({
         "type": "RULES_UPDATED",
         "domain": domain,
-        "action": req.action
+        "action": req.action,
+        "reload": reload_res
     })
     
     return {
         "success": success,
         "domain": domain,
-        "rule": format_routinga_rule(domain, req.action, req.match_type)
+        "rule": format_routinga_rule(domain, req.action, req.match_type),
+        "reload": reload_res
     }
 
 @app.post("/api/rules/update")
@@ -162,14 +166,16 @@ async def update_rule(req: UpdateRuleRequest):
         new_action=req.new_action,
         new_category=req.new_category
     )
-    await ws_manager.broadcast({"type": "RULES_UPDATED"})
-    return {"success": success, "new_domain": new_domain}
+    reload_res = await v2raya_manager.reload_v2raya()
+    await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
+    return {"success": success, "new_domain": new_domain, "reload": reload_res}
 
 @app.delete("/api/rules")
 async def delete_rule(target: str):
     success = v2raya_manager.delete_rule_by_target(target)
-    await ws_manager.broadcast({"type": "RULES_UPDATED"})
-    return {"success": success}
+    reload_res = await v2raya_manager.reload_v2raya()
+    await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
+    return {"success": success, "reload": reload_res}
 
 @app.get("/api/rules/audit")
 async def audit_rules():
@@ -178,20 +184,29 @@ async def audit_rules():
 @app.post("/api/rules/auto-fix")
 async def auto_fix_rules():
     result = v2raya_manager.auto_fix_rules()
-    await ws_manager.broadcast({"type": "RULES_UPDATED"})
-    return result
+    reload_res = await v2raya_manager.reload_v2raya()
+    await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
+    return {**result, "reload": reload_res}
 
 @app.post("/api/rules/optimize")
 async def optimize_rules():
     result = v2raya_manager.optimize_rules()
-    await ws_manager.broadcast({"type": "RULES_UPDATED"})
-    return result
+    reload_res = await v2raya_manager.reload_v2raya()
+    await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
+    return {**result, "reload": reload_res}
 
 @app.post("/api/rules/raw")
 async def save_raw_rules(req: RawRuleRequest):
     success = v2raya_manager.save_raw_routinga(req.content)
-    await ws_manager.broadcast({"type": "RULES_UPDATED"})
-    return {"success": success}
+    reload_res = await v2raya_manager.reload_v2raya()
+    await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
+    return {"success": success, "reload": reload_res}
+
+@app.post("/api/v2ray/reload")
+async def reload_v2ray():
+    result = await v2raya_manager.reload_v2raya()
+    await ws_manager.broadcast({"type": "V2RAY_RELOADED", "data": result})
+    return result
 
 # --- Monitoring Endpoints ---
 

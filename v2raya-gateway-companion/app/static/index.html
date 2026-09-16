@@ -331,6 +331,14 @@
               <span>🧹 语法去重</span>
             </button>
 
+            <!-- Manual Reload Button -->
+            <button @click="triggerReload" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-medium transition-all flex items-center space-x-1" title="立即通知 v2rayA 重载内核生效">
+              <svg class="w-3.5 h-3.5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+              </svg>
+              <span>立即重载生效</span>
+            </button>
+
             <!-- Toggle Raw Editor -->
             <button @click="showRawEditor = !showRawEditor" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-all">
               {{ showRawEditor ? '切换为卡片视图' : '纯文本' }}
