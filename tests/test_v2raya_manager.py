@@ -153,3 +153,83 @@ def test_check_for_external_changes(tmp_path):
     assert changed is True
     assert "updated-by-v2raya.com" in mgr.get_raw_routinga()
 
+def test_geosite_and_geoip_parsing(tmp_path):
+    sample = """
+# =========================================================
+# 中国大陆及私有地址直连
+# =========================================================
+
+domain(geosite:cn) -> direct
+ip(geoip:private, geoip:cn) -> direct
+
+# =========================================================
+# 香港 / 澳门 IP
+# =========================================================
+
+ip(geoip:hk, geoip:mo) -> proxy
+
+# =========================================================
+# IP 网段与外部规则
+# =========================================================
+
+ip(91.108.4.0/22) -> proxy
+domain(ext:"LoyalsoldierSite.dat:gfw") -> proxy
+"""
+    conf_file = tmp_path / "routinga.conf"
+    conf_file.write_text(sample, encoding="utf-8")
+
+    mgr = V2RayAManager()
+    mgr.backup_path = str(conf_file)
+    mgr.db_path = "/nonexistent/path/db.sqlite"
+
+    rules = mgr.parse_rules()
+    assert len(rules) == 5
+
+    geosite_rule = next(r for r in rules if r["target"] == "geosite:cn")
+    assert geosite_rule["rule_type"] == "geosite"
+    assert geosite_rule["target_type"] == "domain"
+    assert geosite_rule["action"] == "direct"
+    assert geosite_rule["category"] == "中国大陆及私有地址直连"
+
+    geoip_rule = next(r for r in rules if "geoip:hk" in r["target"])
+    assert geoip_rule["rule_type"] == "geoip"
+    assert geoip_rule["target_type"] == "ip"
+    assert geoip_rule["action"] == "proxy"
+    assert geoip_rule["category"] == "香港 / 澳门 IP"
+
+    ip_rule = next(r for r in rules if "91.108.4.0/22" in r["target"])
+    assert ip_rule["rule_type"] == "ip"
+    assert ip_rule["match_type"] == "cidr"
+    assert ip_rule["target_type"] == "ip"
+
+    ext_rule = next(r for r in rules if "LoyalsoldierSite.dat:gfw" in r["target"])
+    assert ext_rule["rule_type"] == "ext"
+    assert ext_rule["target_type"] == "domain"
+
+def test_add_and_update_with_category(tmp_path):
+    conf_file = tmp_path / "routinga.conf"
+    conf_file.write_text("default: direct\n", encoding="utf-8")
+
+    mgr = V2RayAManager()
+    mgr.backup_path = str(conf_file)
+    mgr.db_path = "/nonexistent/path/db.sqlite"
+
+    # Add geosite rule under new category
+    mgr.add_rule(target="geosite:google", action="proxy", match_type="geosite", target_type="domain", category="Google 预设")
+    rules = mgr.parse_rules()
+    assert any(r["target"] == "geosite:google" and r["category"] == "Google 预设" for r in rules)
+
+    # Move to another category
+    mgr.update_rule(
+        old_target="geosite:google",
+        new_target="geosite:google",
+        new_match_type="geosite",
+        new_action="proxy",
+        new_category="常用海外网站",
+        target_type="domain"
+    )
+    rules2 = mgr.parse_rules()
+    updated = next(r for r in rules2 if r["target"] == "geosite:google")
+    assert updated["category"] == "常用海外网站"
+
+

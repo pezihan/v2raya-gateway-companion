@@ -418,13 +418,15 @@
                       {{ rule.target }}
                     </div>
                     <div class="flex items-center space-x-2 text-xs">
-                      <span class="text-slate-500">{{ rule.target_type }}:{{ rule.match_type }}</span>
-                      <span v-if="rule.has_www" class="text-amber-400 text-[10px] bg-amber-400/10 px-1 rounded">含 www</span>
+                      <span :class="getRuleBadge(rule).class" class="px-2 py-0.5 rounded text-[10px] font-medium border flex items-center space-x-1">
+                        <span>{{ getRuleBadge(rule).text }}</span>
+                      </span>
+                      <span v-if="rule.has_www" class="text-amber-400 text-[10px] bg-amber-400/10 px-1 rounded border border-amber-400/20">含 www</span>
                     </div>
                   </div>
 
                   <!-- Action Cycle Badge -->
-                  <button @click="cycleRuleAction(rule)" title="点击切换动作 (Proxy/Direct/Block)" :class="{
+                  <button @click="cycleRuleAction(rule)" title="点击快速切换动作 (Proxy/Direct/Block)" :class="{
                     'bg-brand-500/10 text-brand-400 border-brand-500/30 hover:bg-brand-500/20': rule.action === 'proxy',
                     'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20': rule.action === 'direct',
                     'bg-rose-500/10 text-rose-400 border-rose-500/30 hover:bg-rose-500/20': rule.action === 'block'
@@ -435,7 +437,7 @@
 
                 <!-- Footer buttons on card -->
                 <div v-if="rule.target_type !== 'default'" class="border-t border-slate-800/60 pt-2 flex items-center justify-between text-xs">
-                  <span class="text-slate-500 text-[11px]">{{ rule.match_type === 'domain' ? '通配子域' : '精准匹配' }}</span>
+                  <span class="text-slate-400 text-[11px]">{{ getRuleFooter(rule) }}</span>
                   <div class="flex items-center space-x-2">
                     <button @click="openEditModal(rule)" class="p-1 rounded text-slate-400 hover:text-brand-400 hover:bg-slate-800 transition-colors" title="修改该规则">
                       <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -460,53 +462,133 @@
     </main>
 
     <!-- ============================================================= -->
-    <!-- MODAL: 规则编辑 / 新增弹窗 (防错输入体验)                     -->
+    <!-- MODAL: 规则编辑 / 新增弹窗 (全类型防错与预设即选体验)          -->
     <!-- ============================================================= -->
     <div v-if="modal.show" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
       <div class="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in duration-200">
         <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-          <h3 class="text-base font-bold text-white">{{ modal.isEdit ? '编辑分流规则' : '新增分流规则' }}</h3>
+          <div class="flex items-center space-x-2">
+            <h3 class="text-base font-bold text-white">{{ modal.isEdit ? '编辑分流规则' : '新增分流规则' }}</h3>
+            <span class="text-xs text-slate-400">（实时双向同步至 v2rayA）</span>
+          </div>
           <button @click="modal.show = false" class="text-slate-400 hover:text-slate-200">
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
         </div>
 
         <div class="space-y-4 text-xs">
-          <!-- Domain Input -->
+          <!-- Rule Type Navigation Tabs -->
           <div class="space-y-1.5">
-            <label class="block font-semibold text-slate-300">目标域名 / URL (自动清洗提炼):</label>
-            <input v-model="modal.target" @input="onModalTargetInput" type="text" placeholder="例: google.com 或 https://www.google.com" 
-              class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 font-mono">
-            
-            <!-- Root domain suggestion pill in modal -->
-            <div v-if="modal.suggestedRoot" class="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-between mt-2">
-              <span class="text-amber-300">💡 推荐改为根域名: <strong class="font-mono">{{ modal.suggestedRoot }}</strong> (覆盖全站)</span>
-              <button @click="modal.target = modal.suggestedRoot; modal.suggestedRoot = null" class="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded">
-                一键应用
+            <label class="block font-semibold text-slate-300">规则类型 (Type):</label>
+            <div class="grid grid-cols-4 gap-1.5 p-1 bg-slate-950 border border-slate-800 rounded-xl">
+              <button type="button" @click="setModalRuleType('domain')" 
+                :class="modal.ruleType === 'domain' ? 'bg-brand-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'" 
+                class="py-1.5 px-2 rounded-lg text-xs font-medium transition-all text-center">
+                🌐 网站域名
+              </button>
+              <button type="button" @click="setModalRuleType('geosite')" 
+                :class="modal.ruleType === 'geosite' ? 'bg-brand-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'" 
+                class="py-1.5 px-2 rounded-lg text-xs font-medium transition-all text-center">
+                📦 GeoSite集
+              </button>
+              <button type="button" @click="setModalRuleType('geoip')" 
+                :class="modal.ruleType === 'geoip' ? 'bg-brand-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'" 
+                class="py-1.5 px-2 rounded-lg text-xs font-medium transition-all text-center">
+                🗺️ GeoIP库
+              </button>
+              <button type="button" @click="setModalRuleType('cidr')" 
+                :class="modal.ruleType === 'cidr' ? 'bg-brand-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'" 
+                class="py-1.5 px-2 rounded-lg text-xs font-medium transition-all text-center">
+                🔢 IP网段
               </button>
             </div>
           </div>
 
-          <!-- Match Type Selection -->
-          <div class="space-y-1.5">
-            <label class="block font-semibold text-slate-300">匹配模式 (Match Type):</label>
-            <div class="grid grid-cols-2 gap-2">
-              <label class="flex items-start space-x-2.5 p-3 rounded-xl border cursor-pointer transition-all" 
-                :class="modal.match_type === 'domain' ? 'bg-brand-600/10 border-brand-500 text-brand-300' : 'bg-slate-950 border-slate-800 text-slate-400'">
-                <input type="radio" v-model="modal.match_type" value="domain" class="mt-0.5">
-                <div>
-                  <div class="font-bold">domain: 泛域名匹配</div>
-                  <div class="text-[10px] text-slate-400 mt-0.5">匹配该域名及所有二级/三级子域（强烈推荐）</div>
-                </div>
-              </label>
-              <label class="flex items-start space-x-2.5 p-3 rounded-xl border cursor-pointer transition-all"
-                :class="modal.match_type === 'full' ? 'bg-brand-600/10 border-brand-500 text-brand-300' : 'bg-slate-950 border-slate-800 text-slate-400'">
-                <input type="radio" v-model="modal.match_type" value="full" class="mt-0.5">
-                <div>
-                  <div class="font-bold">full: 精准匹配</div>
-                  <div class="text-[10px] text-slate-400 mt-0.5">仅匹配该完整域名，不含子域</div>
-                </div>
-              </label>
+          <!-- Tab 1: Domain Input -->
+          <div v-if="modal.ruleType === 'domain'" class="space-y-3">
+            <div class="space-y-1.5">
+              <label class="block font-semibold text-slate-300">目标域名 / URL (自动清洗提炼):</label>
+              <input v-model="modal.target" @input="onModalTargetInput" type="text" placeholder="例: google.com 或 https://www.google.com" 
+                class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 font-mono">
+              
+              <!-- Root domain suggestion pill in modal -->
+              <div v-if="modal.suggestedRoot" class="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-between mt-2">
+                <span class="text-amber-300">💡 推荐改为根域名: <strong class="font-mono">{{ modal.suggestedRoot }}</strong> (覆盖全站)</span>
+                <button type="button" @click="modal.target = modal.suggestedRoot; modal.suggestedRoot = null" class="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded">
+                  一键应用
+                </button>
+              </div>
+            </div>
+
+            <!-- Match Type Selection for Domain -->
+            <div class="space-y-1.5">
+              <label class="block font-semibold text-slate-300">域名匹配模式 (Match Type):</label>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="flex items-start space-x-2.5 p-2.5 rounded-xl border cursor-pointer transition-all" 
+                  :class="modal.match_type === 'domain' ? 'bg-brand-600/10 border-brand-500 text-brand-300' : 'bg-slate-950 border-slate-800 text-slate-400'">
+                  <input type="radio" v-model="modal.match_type" value="domain" class="mt-0.5">
+                  <div>
+                    <div class="font-bold text-xs">domain: 泛域名匹配</div>
+                    <div class="text-[10px] text-slate-400">匹配该域名及所有二级/三级子域（强烈推荐）</div>
+                  </div>
+                </label>
+                <label class="flex items-start space-x-2.5 p-2.5 rounded-xl border cursor-pointer transition-all"
+                  :class="modal.match_type === 'full' ? 'bg-brand-600/10 border-brand-500 text-brand-300' : 'bg-slate-950 border-slate-800 text-slate-400'">
+                  <input type="radio" v-model="modal.match_type" value="full" class="mt-0.5">
+                  <div>
+                    <div class="font-bold text-xs">full: 精准匹配</div>
+                    <div class="text-[10px] text-slate-400">仅严格匹配该完整主机名，不含子域</div>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2: GeoSite Preset Selector -->
+          <div v-if="modal.ruleType === 'geosite'" class="space-y-3">
+            <div class="space-y-1.5">
+              <label class="block font-semibold text-slate-300">GeoSite 域名预设集 (免手写，下拉即选):</label>
+              <select v-model="modal.geositePreset" @change="onGeositePresetChange" 
+                class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-brand-500">
+                <option v-for="p in geositePresets" :key="p.value" :value="p.value">
+                  {{ p.label }} [{{ p.value }}]
+                </option>
+                <option value="__custom__">✏️ 自定义输入其它 GeoSite 代码...</option>
+              </select>
+            </div>
+            <div v-if="modal.geositePreset === '__custom__'" class="space-y-1.5">
+              <label class="block text-slate-400 text-[11px]">自定义 GeoSite 或外部 DAT 规则代码:</label>
+              <input v-model="modal.customTarget" type="text" placeholder="例: geosite:apple 或 ext:LoyalsoldierSite.dat:gfw" 
+                class="w-full bg-slate-950 border border-brand-500/70 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none">
+            </div>
+          </div>
+
+          <!-- Tab 3: GeoIP Preset Selector -->
+          <div v-if="modal.ruleType === 'geoip'" class="space-y-3">
+            <div class="space-y-1.5">
+              <label class="block font-semibold text-slate-300">GeoIP 预设 IP 库 (免手写，下拉即选):</label>
+              <select v-model="modal.geoipPreset" @change="onGeoipPresetChange" 
+                class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-brand-500">
+                <option v-for="p in geoipPresets" :key="p.value" :value="p.value">
+                  {{ p.label }} [{{ p.value }}]
+                </option>
+                <option value="__custom__">✏️ 自定义输入其它 GeoIP 组合...</option>
+              </select>
+            </div>
+            <div v-if="modal.geoipPreset === '__custom__'" class="space-y-1.5">
+              <label class="block text-slate-400 text-[11px]">自定义 GeoIP 代码 (支持英文逗号拼接多个):</label>
+              <input v-model="modal.customTarget" type="text" placeholder="例: geoip:hk, geoip:mo" 
+                class="w-full bg-slate-950 border border-brand-500/70 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none">
+            </div>
+          </div>
+
+          <!-- Tab 4: CIDR IP -->
+          <div v-if="modal.ruleType === 'cidr'" class="space-y-3">
+            <div class="space-y-1.5">
+              <label class="block font-semibold text-slate-300">IP 或 CIDR 网段地址:</label>
+              <input v-model="modal.target" type="text" placeholder="例: 91.108.4.0/22 或 &quot;2001:b28:f23c::/48&quot; 或 1.1.1.1" 
+                class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+              <p class="text-[10px] text-slate-400">支持单个 IPv4/IPv6 地址，或带掩码的 CIDR 网段</p>
             </div>
           </div>
 
@@ -532,11 +614,35 @@
             </div>
           </div>
 
-          <!-- Category Selection -->
+          <!-- Category Selection & Creation -->
           <div class="space-y-1.5">
-            <label class="block font-semibold text-slate-300">归属分类 (Category):</label>
-            <input v-model="modal.category" type="text" placeholder="例: 自定义代理、Telegram、常用海外网站" 
-              class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+            <div class="flex items-center justify-between">
+              <label class="block font-semibold text-slate-300">归属分类 (Category):</label>
+              <button type="button" @click="toggleCategoryMode" class="text-[11px] text-brand-400 hover:text-brand-300 transition-colors flex items-center space-x-1 font-medium">
+                <span v-if="modal.categoryMode === 'select'">➕ 创建新分类</span>
+                <span v-else>📋 选择已有分类</span>
+              </button>
+            </div>
+
+            <!-- Mode A: Select existing category -->
+            <div v-if="modal.categoryMode === 'select'" class="space-y-1">
+              <select v-model="modal.category" @change="onCategorySelectChange" 
+                class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-brand-500">
+                <option v-for="cat in availableCategories" :key="cat" :value="cat">
+                  📁 {{ cat }}
+                </option>
+                <option value="__NEW_CATEGORY__">➕ 添加新分类...</option>
+              </select>
+            </div>
+
+            <!-- Mode B: Type new category -->
+            <div v-else class="space-y-1">
+              <div class="relative">
+                <input v-model="modal.newCategoryInput" type="text" placeholder="输入新分类名称，例: 流媒体解锁、办公专线" 
+                  class="w-full bg-slate-950 border border-brand-500/80 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-brand-500">
+              </div>
+              <p class="text-[10px] text-slate-400">将创建新的分类标题并在 v2rayA 中生成独立分区</p>
+            </div>
           </div>
         </div>
 
@@ -544,7 +650,7 @@
           <button @click="modal.show = false" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium">
             取消
           </button>
-          <button @click="submitModal" class="px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-lg shadow-brand-500/25">
+          <button @click="submitModal" class="px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-lg shadow-brand-500/25 transition-all">
             💾 确认写入并同步至 v2rayA
           </button>
         </div>

@@ -113,10 +113,44 @@ def analyze_domain(input_text: str) -> Dict:
         "suggested_root": root_domain if is_subdomain else None
     }
 
-def format_routinga_rule(domain: str, action: str = "proxy", match_type: str = "domain") -> str:
+def format_routinga_rule(
+    target: str,
+    action: str = "proxy",
+    match_type: str = "domain",
+    target_type: str = "domain"
+) -> str:
     """
-    Formats a domain into a standard RoutingA line.
-    match_type: 'domain' (matches domain + all subdomains) or 'full' (exact match)
+    Formats a target into a standard RoutingA line.
+    Supports:
+      - IP rules: ip(geoip:hk, geoip:mo) -> proxy, ip(91.108.4.0/22) -> proxy
+      - GeoSite: domain(geosite:cn) -> direct
+      - Ext DAT: domain(ext:"LoyalsoldierSite.dat:gfw") -> proxy
+      - Domain types: domain(domain:google.com) -> proxy, domain(full:mail.qq.com) -> direct,
+                      domain(keyword:google) -> proxy, domain(regexp:...) -> proxy
     """
-    domain = domain.strip().lower()
-    return f"domain({match_type}:{domain}) -> {action}"
+    t = target.strip()
+    act = action.strip().lower()
+    t_lower = t.lower()
+
+    # 1. IP rule types (target_type is ip, or starts with geoip:, or is an IP/CIDR)
+    if target_type == "ip" or match_type in ["geoip", "cidr", "ip"] or t_lower.startswith("geoip:"):
+        return f"ip({t}) -> {act}"
+
+    # 2. GeoSite preset: domain(geosite:cn) -> direct
+    if t_lower.startswith("geosite:"):
+        return f"domain({t_lower}) -> {act}"
+
+    # 3. External dat preset: domain(ext:"...") -> proxy
+    if t_lower.startswith("ext:"):
+        return f"domain({t}) -> {act}"
+
+    # 4. Keyword / Regex / Full match types
+    if match_type in ["full", "keyword", "regexp"]:
+        return f"domain({match_type}:{t_lower}) -> {act}"
+
+    # 5. Default domain match
+    if t_lower.startswith("domain:"):
+        return f"domain({t_lower}) -> {act}"
+
+    return f"domain(domain:{t_lower}) -> {act}"
+

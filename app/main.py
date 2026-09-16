@@ -143,9 +143,11 @@ class CheckDomainRequest(BaseModel):
     force_refresh: bool = False
 
 class AddRuleRequest(BaseModel):
-    domain: str
+    target: Optional[str] = None
+    domain: Optional[str] = None # backward compatibility
     action: str = "proxy" # proxy, direct, block
-    match_type: str = "domain" # domain, full
+    match_type: str = "domain" # domain, full, keyword, regexp, geosite, geoip, cidr, ext
+    target_type: str = "domain" # domain, ip
     category: str = "自定义代理"
 
 class UpdateRuleRequest(BaseModel):
@@ -154,6 +156,7 @@ class UpdateRuleRequest(BaseModel):
     new_match_type: str = "domain"
     new_action: str = "proxy"
     new_category: Optional[str] = None
+    target_type: Optional[str] = None
 
 class RawRuleRequest(BaseModel):
     content: str
@@ -205,8 +208,17 @@ async def api_check_domain(req: CheckDomainRequest):
 
 @app.get("/api/rules")
 async def get_rules():
+    parsed = v2raya_manager.parse_rules()
+    categories = []
+    seen = set()
+    for r in parsed:
+        cat = r.get("category")
+        if cat and cat not in seen:
+            seen.add(cat)
+            categories.append(cat)
     return {
-        "rules": v2raya_manager.parse_rules(),
+        "rules": parsed,
+        "categories": categories,
         "raw": v2raya_manager.get_raw_routinga(),
         "audit": v2raya_manager.audit_rules(),
         "storage": v2raya_manager.get_sync_status()
@@ -214,14 +226,39 @@ async def get_rules():
 
 @app.post("/api/rules/add")
 async def add_rule(req: AddRuleRequest):
-    domain = extract_domain(req.domain)
-    if not domain:
-        raise HTTPException(status_code=400, detail="无效的域名")
-        
-    success = v2raya_manager.add_domain_rule(
-        domain=domain,
+    raw_val = (req.target or req.domain or "").strip()
+    if not raw_val:
+        raise HTTPException(status_code=400, detail="目标不能为空")
+
+    target_type = req.target_type or "domain"
+    match_type = req.match_type or "domain"
+
+    if raw_val.lower().startswith("geoip:"):
+        target_type = "ip"
+        match_type = "geoip"
+        target = raw_val
+    elif raw_val.lower().startswith("geosite:"):
+        target_type = "domain"
+        match_type = "geosite"
+        target = raw_val.lower()
+    elif raw_val.lower().startswith("ext:"):
+        target_type = "domain"
+        match_type = "ext"
+        target = raw_val
+    elif target_type == "ip" or "/" in raw_val:
+        target_type = "ip"
+        match_type = match_type if match_type != "domain" else "cidr"
+        target = raw_val
+    else:
+        # Standard domain
+        extracted = extract_domain(raw_val)
+        target = extracted if extracted else raw_val
+
+    success = v2raya_manager.add_rule(
+        target=target,
         action=req.action,
-        match_type=req.match_type,
+        match_type=match_type,
+        target_type=target_type,
         category=req.category
     )
     
@@ -229,34 +266,59 @@ async def add_rule(req: AddRuleRequest):
     
     await ws_manager.broadcast({
         "type": "RULES_UPDATED",
-        "domain": domain,
+        "target": target,
         "action": req.action,
         "reload": reload_res
     })
     
     return {
         "success": success,
-        "domain": domain,
-        "rule": format_routinga_rule(domain, req.action, req.match_type),
+        "target": target,
+        "domain": target, # backward compat
+        "rule": format_routinga_rule(target, req.action, match_type, target_type),
         "reload": reload_res
     }
 
 @app.post("/api/rules/update")
 async def update_rule(req: UpdateRuleRequest):
-    new_domain = extract_domain(req.new_target)
-    if not new_domain:
-        raise HTTPException(status_code=400, detail="新域名格式无效")
-        
+    raw_val = req.new_target.strip()
+    if not raw_val:
+        raise HTTPException(status_code=400, detail="新目标不能为空")
+
+    target_type = req.target_type or ("ip" if raw_val.lower().startswith("geoip:") or "/" in raw_val else "domain")
+    match_type = req.new_match_type or "domain"
+
+    if raw_val.lower().startswith("geoip:"):
+        target_type = "ip"
+        match_type = "geoip"
+        new_target = raw_val
+    elif raw_val.lower().startswith("geosite:"):
+        target_type = "domain"
+        match_type = "geosite"
+        new_target = raw_val.lower()
+    elif raw_val.lower().startswith("ext:"):
+        target_type = "domain"
+        match_type = "ext"
+        new_target = raw_val
+    elif target_type == "ip" or "/" in raw_val:
+        target_type = "ip"
+        match_type = match_type if match_type != "domain" else "cidr"
+        new_target = raw_val
+    else:
+        extracted = extract_domain(raw_val)
+        new_target = extracted if extracted else raw_val
+
     success = v2raya_manager.update_rule(
         old_target=req.old_target,
-        new_target=new_domain,
-        new_match_type=req.new_match_type,
+        new_target=new_target,
+        new_match_type=match_type,
         new_action=req.new_action,
-        new_category=req.new_category
+        new_category=req.new_category,
+        target_type=target_type
     )
     reload_res = await v2raya_manager.reload_v2raya()
     await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
-    return {"success": success, "new_domain": new_domain, "reload": reload_res}
+    return {"success": success, "new_target": new_target, "new_domain": new_target, "reload": reload_res}
 
 @app.delete("/api/rules")
 async def delete_rule(target: str):

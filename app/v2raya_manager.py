@@ -481,18 +481,46 @@ class V2RayAManager:
             match = rule_regex.match(stripped)
             if match:
                 target_type = match.group(1).lower() # domain / ip
-                match_type = match.group(2).lower() if match.group(2) else "domain"
-                target_value = match.group(3).strip().lower()
+                raw_prefix = match.group(2).lower() if match.group(2) else ""
+                target_value = match.group(3).strip()
                 action = match.group(4).lower()
 
-                # Issue detection for this specific rule
-                has_www = target_value.startswith("www.")
-                root_domain = get_root_domain(target_value)
-                is_sub = (target_value != root_domain) and (not re.match(r'^\d+\.\d+\.\d+\.\d+$', target_value))
+                # Accurately classify rule_type and match_type
+                if target_type == "ip":
+                    if target_value.lower().startswith("geoip:"):
+                        rule_type = "geoip"
+                        match_type = "geoip"
+                    else:
+                        rule_type = "ip"
+                        match_type = "cidr" if ("/" in target_value or ":" in target_value) else "ip"
+                    has_www = False
+                    is_sub = False
+                    suggested_root = None
+                elif target_type == "domain":
+                    if target_value.lower().startswith("geosite:"):
+                        rule_type = "geosite"
+                        match_type = "geosite"
+                        has_www = False
+                        is_sub = False
+                        suggested_root = None
+                    elif target_value.lower().startswith("ext:"):
+                        rule_type = "ext"
+                        match_type = "ext"
+                        has_www = False
+                        is_sub = False
+                        suggested_root = None
+                    else:
+                        rule_type = "domain"
+                        match_type = raw_prefix if raw_prefix in ["full", "keyword", "regexp"] else "domain"
+                        has_www = target_value.lower().startswith("www.")
+                        root_domain = get_root_domain(target_value)
+                        is_sub = (target_value.lower() != root_domain.lower()) and (not re.match(r'^\d+\.\d+\.\d+\.\d+$', target_value))
+                        suggested_root = root_domain if is_sub else None
 
                 rules.append({
                     "id": f"rule_{line_num}_{abs(hash(stripped)) % 10000}",
                     "line": line_num,
+                    "rule_type": rule_type,
                     "target_type": target_type,
                     "match_type": match_type,
                     "target": target_value,
@@ -500,7 +528,7 @@ class V2RayAManager:
                     "category": current_category,
                     "has_www": has_www,
                     "is_subdomain": is_sub,
-                    "suggested_root": root_domain if is_sub else None,
+                    "suggested_root": suggested_root,
                     "raw": stripped
                 })
             elif stripped.startswith("default:"):
@@ -508,6 +536,7 @@ class V2RayAManager:
                 rules.append({
                     "id": f"default_{line_num}",
                     "line": line_num,
+                    "rule_type": "default",
                     "target_type": "default",
                     "match_type": "default",
                     "target": "default",
@@ -528,7 +557,7 @@ class V2RayAManager:
         domain = domain.lower().strip()
         for r in rules:
             if r.get("target_type") == "domain" and r.get("action") == "proxy":
-                target = r.get("target", "")
+                target = r.get("target", "").lower()
                 match_type = r.get("match_type", "domain")
                 if match_type == "full":
                     if target == domain:
@@ -538,14 +567,21 @@ class V2RayAManager:
                         return True
         return False
 
-    def add_domain_rule(self, domain: str, action: str = "proxy", match_type: str = "domain", category: str = "自定义代理") -> bool:
-        """Adds a new domain rule under specified category with formatting"""
-        domain = domain.lower().strip()
-        raw_text = self.get_raw_routinga()
-        new_rule_str = format_routinga_rule(domain, action, match_type)
+    def add_rule(
+        self,
+        target: str,
+        action: str = "proxy",
+        match_type: str = "domain",
+        target_type: str = "domain",
+        category: str = "自定义代理"
+    ) -> bool:
+        """Adds a new rule (domain, geosite, geoip, ip/cidr) under specified category"""
+        target = target.strip()
+        new_rule_str = format_routinga_rule(target, action, match_type, target_type)
 
+        raw_text = self.get_raw_routinga()
         lines = raw_text.splitlines()
-        category_header = f"# {category}"
+        category_header = f"# {category.strip()}"
 
         # Find category index
         cat_index = -1
@@ -555,53 +591,96 @@ class V2RayAManager:
                 break
 
         if cat_index != -1:
-            lines.insert(cat_index + 1, new_rule_str)
+            # Check if there is a divider line after category header like # ===================
+            insert_pos = cat_index + 1
+            if insert_pos < len(lines) and lines[insert_pos].strip().startswith("# ==="):
+                insert_pos += 1
+            lines.insert(insert_pos, new_rule_str)
         else:
             lines.append("")
+            lines.append("# =========================================================")
             lines.append(category_header)
+            lines.append("# =========================================================")
+            lines.append("")
             lines.append(new_rule_str)
 
         return self.save_raw_routinga("\n".join(lines))
 
-    def update_rule(self, old_target: str, new_target: str, new_match_type: str = "domain", new_action: str = "proxy", new_category: Optional[str] = None) -> bool:
+    def add_domain_rule(self, domain: str, action: str = "proxy", match_type: str = "domain", category: str = "自定义代理") -> bool:
+        """Backward compatibility alias for add_rule"""
+        return self.add_rule(target=domain, action=action, match_type=match_type, target_type="domain", category=category)
+
+    def update_rule(
+        self,
+        old_target: str,
+        new_target: str,
+        new_match_type: str = "domain",
+        new_action: str = "proxy",
+        new_category: Optional[str] = None,
+        target_type: Optional[str] = None
+    ) -> bool:
         """
         Updates an existing rule:
         Modifies target, match_type, action, or moves category.
         """
-        old_target = old_target.lower().strip()
-        new_target = new_target.lower().strip()
-        new_rule_str = format_routinga_rule(new_target, new_action, new_match_type)
+        old_clean = re.sub(r'\s*,\s*', ',', old_target.lower().strip())
+        new_clean = new_target.strip()
+        
+        # Detect target_type if not provided
+        if not target_type:
+            if new_clean.lower().startswith("geoip:") or "/" in new_clean:
+                target_type = "ip"
+            else:
+                target_type = "domain"
+
+        new_rule_str = format_routinga_rule(new_clean, new_action, new_match_type, target_type)
         
         raw_text = self.get_raw_routinga()
         lines = raw_text.splitlines()
+
+        # Find line index and its category
+        old_line_idx = -1
+        current_rule_cat = "默认分类"
         
-        found = False
-        new_lines = []
-        for line in lines:
+        for idx, line in enumerate(lines):
             stripped = line.strip()
-            # Match line that configures old_target
-            if old_target in stripped.lower() and "->" in stripped and not stripped.startswith("#"):
-                new_lines.append(new_rule_str)
-                found = True
-            else:
-                new_lines.append(line)
+            if stripped.startswith("#"):
+                comment_text = stripped.lstrip("# \t")
+                if comment_text and not comment_text.startswith("==="):
+                    current_rule_cat = comment_text
+                continue
 
-        if not found:
-            # Fallback: add if not found
-            return self.add_domain_rule(new_target, new_action, new_match_type, new_category or "自定义代理")
+            if "->" in stripped and not stripped.startswith("#"):
+                line_normalized = re.sub(r'\s*,\s*', ',', stripped.lower())
+                if old_clean in line_normalized or old_target.lower() in stripped.lower():
+                    old_line_idx = idx
+                    break
 
-        return self.save_raw_routinga("\n".join(new_lines))
+        if old_line_idx == -1:
+            # Fallback: add rule
+            return self.add_rule(new_clean, new_action, new_match_type, target_type, new_category or "自定义代理")
+
+        # If new_category is specified and different from current category, remove old and insert into new
+        if new_category and new_category.strip().lower() != current_rule_cat.strip().lower():
+            lines.pop(old_line_idx)
+            self.save_raw_routinga("\n".join(lines))
+            return self.add_rule(new_clean, new_action, new_match_type, target_type, new_category)
+        else:
+            lines[old_line_idx] = new_rule_str
+            return self.save_raw_routinga("\n".join(lines))
 
     def delete_rule_by_target(self, target: str) -> bool:
         """Deletes any rule matching target domain/IP"""
-        target = target.lower().strip()
+        target_clean = re.sub(r'\s*,\s*', ',', target.lower().strip())
         raw_text = self.get_raw_routinga()
         lines = raw_text.splitlines()
         new_lines = []
         for line in lines:
             stripped = line.strip()
-            if target in stripped.lower() and "->" in stripped and not stripped.startswith("#"):
-                continue
+            if not stripped.startswith("#") and "->" in stripped:
+                line_norm = re.sub(r'\s*,\s*', ',', stripped.lower())
+                if target_clean in line_norm or target.lower().strip() in stripped.lower():
+                    continue
             new_lines.append(line)
         return self.save_raw_routinga("\n".join(new_lines))
 
@@ -635,6 +714,10 @@ class V2RayAManager:
                     "can_auto_fix": True
                 })
             seen_rules.add(raw)
+
+            # Domain-specific audit checks (skip IP, GeoIP, GeoSite, ext DAT)
+            if r.get("rule_type") != "domain":
+                continue
 
             if r.get("has_www") and m_type == "domain":
                 root = get_root_domain(target)
