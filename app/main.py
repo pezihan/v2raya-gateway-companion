@@ -2,12 +2,13 @@ from contextlib import asynccontextmanager
 import asyncio
 import json
 from typing import Optional, List, Dict
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.config import settings
+from app.auth import verify_token, verify_password, generate_auth_token, LoginRequest
 from app.domain_utils import extract_domain, get_root_domain, analyze_domain, format_routinga_rule
 from app.gfw_prober import prober
 from app.v2raya_manager import v2raya_manager
@@ -62,6 +63,67 @@ async def lifespan(app: FastAPI):
         pass
 
 app = FastAPI(title="v2rayA Gateway Companion", version="1.0.0", lifespan=lifespan)
+
+# HTTP Authentication Middleware
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if settings.AUTH_PASSWORD and path.startswith("/api/") and not path.startswith("/api/auth/"):
+        token = ""
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        elif "auth_token" in request.cookies:
+            token = request.cookies["auth_token"]
+        elif "token" in request.query_params:
+            token = request.query_params["token"]
+
+        if not verify_token(token):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Authentication required", "auth_required": True}
+            )
+    return await call_next(request)
+
+# Auth Endpoints
+@app.get("/api/auth/status")
+async def get_auth_status(request: Request):
+    if not settings.AUTH_PASSWORD:
+        return {"auth_required": False, "authenticated": True}
+    
+    token = ""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    elif "auth_token" in request.cookies:
+        token = request.cookies["auth_token"]
+    elif "token" in request.query_params:
+        token = request.query_params["token"]
+
+    return {
+        "auth_required": True,
+        "authenticated": verify_token(token)
+    }
+
+@app.post("/api/auth/login")
+async def auth_login(req: LoginRequest, response: Response):
+    if not verify_password(req.password):
+        raise HTTPException(status_code=400, detail="密码错误，请重新输入")
+    token = generate_auth_token(settings.AUTH_PASSWORD)
+    response.set_cookie(
+        key="auth_token",
+        value=token,
+        max_age=30 * 86400,
+        httponly=False,
+        samesite="lax",
+        path="/"
+    )
+    return {"success": True, "token": token}
+
+@app.post("/api/auth/logout")
+async def auth_logout(response: Response):
+    response.delete_cookie(key="auth_token", path="/")
+    return {"success": True}
 
 # Hook sniffer callback to WebSocket broadcast
 async def on_sniffer_alert(alert: dict):
@@ -285,7 +347,15 @@ async def simulate_traffic(req: SimulateTrafficRequest):
 # --- WebSocket ---
 
 @app.websocket("/ws/live")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
+    # Authenticate WebSocket connection if password is configured
+    if settings.AUTH_PASSWORD:
+        cookie_token = websocket.cookies.get("auth_token")
+        client_token = token or cookie_token
+        if not verify_token(client_token):
+            await websocket.close(code=4001, reason="Unauthorized")
+            return
+
     await ws_manager.connect(websocket)
     try:
         while True:

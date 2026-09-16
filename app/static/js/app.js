@@ -42,13 +42,44 @@ createApp({
       setTimeout(() => { toast.value.show = false; }, 3500);
     };
 
+    // Auth State
+    const authRequired = ref(true);
+    const isAuthenticated = ref(false);
+    const authChecked = ref(false);
+    const loginPassword = ref('');
+    const loginError = ref('');
+    const isLoggingIn = ref(false);
+    const showPassword = ref(false);
+
+    const getAuthToken = () => localStorage.getItem('companion_token') || '';
+
+    // Auth-aware Fetch Wrapper
+    const fetch = async (url, options = {}) => {
+      const token = getAuthToken();
+      const opts = { ...options };
+      const headers = opts.headers ? { ...opts.headers } : {};
+      if (token && !headers['Authorization']) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      opts.headers = headers;
+      const res = await window.fetch(url, opts);
+      if (res.status === 401 && !url.includes('/api/auth/')) {
+        isAuthenticated.value = false;
+        localStorage.removeItem('companion_token');
+      }
+      return res;
+    };
+
     // WebSocket
     let ws = null;
     let timerInterval = null;
 
     const connectWebSocket = () => {
+      if (!isAuthenticated.value) return;
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${protocol}//${location.host}/ws/live`);
+      const token = getAuthToken();
+      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+      ws = new WebSocket(`${protocol}//${location.host}/ws/live${tokenParam}`);
       
       ws.onmessage = (event) => {
         try {
@@ -72,8 +103,74 @@ createApp({
       };
 
       ws.onclose = () => {
-        setTimeout(connectWebSocket, 3000);
+        if (isAuthenticated.value) {
+          setTimeout(connectWebSocket, 3000);
+        }
       };
+    };
+
+    const initApp = () => {
+      connectWebSocket();
+      fetchDevices();
+      fetchStatus();
+      fetchAlerts();
+      fetchRules();
+    };
+
+    const checkAuthStatus = async () => {
+      try {
+        const res = await fetch('/api/auth/status');
+        const data = await res.json();
+        authRequired.value = data.auth_required;
+        isAuthenticated.value = !data.auth_required || data.authenticated;
+        if (isAuthenticated.value) {
+          initApp();
+        }
+      } catch (e) {
+        isAuthenticated.value = false;
+      } finally {
+        authChecked.value = true;
+      }
+    };
+
+    const handleLogin = async () => {
+      if (!loginPassword.value.trim()) {
+        loginError.value = '请输入访问密码';
+        return;
+      }
+      isLoggingIn.value = true;
+      loginError.value = '';
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: loginPassword.value.trim() })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          localStorage.setItem('companion_token', data.token);
+          isAuthenticated.value = true;
+          loginPassword.value = '';
+          showToast('🎉 解锁成功！欢迎使用');
+          initApp();
+        } else {
+          loginError.value = data.detail || '密码错误，请重新输入';
+        }
+      } catch (e) {
+        loginError.value = '连接服务器失败';
+      } finally {
+        isLoggingIn.value = false;
+      }
+    };
+
+    const handleLogout = async () => {
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+      } catch (e) {}
+      localStorage.removeItem('companion_token');
+      isAuthenticated.value = false;
+      if (ws) ws.close();
+      showToast('已安全退出登录');
     };
 
     // Load initial data
@@ -466,20 +563,18 @@ createApp({
     };
 
     const handleVisibilityChange = () => {
-      if (!document.hidden) {
+      if (!document.hidden && isAuthenticated.value) {
         fetchRules();
       }
     };
 
     onMounted(() => {
-      connectWebSocket();
-      fetchDevices();
-      fetchStatus();
-      fetchAlerts();
-      fetchRules();
+      checkAuthStatus();
 
       document.addEventListener('visibilitychange', handleVisibilityChange);
-      window.addEventListener('focus', fetchRules);
+      window.addEventListener('focus', () => {
+        if (isAuthenticated.value) fetchRules();
+      });
 
       timerInterval = setInterval(() => {
         if (monitorStatus.value.is_running) {
@@ -496,6 +591,15 @@ createApp({
     });
 
     return {
+      authRequired,
+      isAuthenticated,
+      authChecked,
+      loginPassword,
+      loginError,
+      isLoggingIn,
+      showPassword,
+      handleLogin,
+      handleLogout,
       currentTab,
       targetIp,
       lanDevices,
