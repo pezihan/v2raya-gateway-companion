@@ -18,6 +18,7 @@ const GEOSITE_PRESETS = [
   { value: 'geosite:microsoft', label: '🪟 Microsoft 微软官方服务', defaultAction: 'direct', defaultCategory: '系统服务' },
   { value: 'geosite:steam', label: '🎮 Steam 游戏与社区', defaultAction: 'proxy', defaultCategory: '游戏与娱乐' },
   { value: 'geosite:bilibili', label: '📺 哔哩哔哩 Bilibili', defaultAction: 'direct', defaultCategory: '国内网站' },
+  { value: 'geosite:gfw', label: '🛡️ GFW 知名被封锁域名清单 (geosite:gfw)', defaultAction: 'proxy', defaultCategory: '常用被墙网站分类' },
   { value: 'ext:"LoyalsoldierSite.dat:gfw"', label: '🛡️ GFWList 阻断域名规则集 (DAT)', defaultAction: 'proxy', defaultCategory: 'GFWList' },
   { value: 'ext:"LoyalsoldierSite.dat:greatfire"', label: '🛡️ GreatFire 阻断列表 (DAT)', defaultAction: 'proxy', defaultCategory: 'GFWList' }
 ];
@@ -406,23 +407,25 @@ createApp({
     };
 
     const openEditModal = (rule) => {
-      const targetLower = (rule.target || '').toLowerCase().trim();
+      const rawTarget = rule.target || '';
+      const cleanTarget = rawTarget.replace(/^["']+|["']+$/g, '').trim();
+      const targetLower = cleanTarget.toLowerCase();
       let ruleType = 'domain';
       let geositePreset = 'geosite:cn';
       let geoipPreset = 'geoip:private, geoip:cn';
       let customTarget = '';
-      let target = rule.target;
+      let target = cleanTarget;
 
-      if (targetLower.startsWith('geosite:') || targetLower.startsWith('ext:')) {
+      if (rule.rule_type === 'geosite' || targetLower.startsWith('geosite:') || targetLower.startsWith('ext:')) {
         ruleType = 'geosite';
         const found = GEOSITE_PRESETS.find(p => p.value.toLowerCase() === targetLower);
         if (found) {
           geositePreset = found.value;
         } else {
           geositePreset = '__custom__';
-          customTarget = rule.target;
+          customTarget = rawTarget;
         }
-      } else if (targetLower.startsWith('geoip:')) {
+      } else if (rule.rule_type === 'geoip' || targetLower.startsWith('geoip:')) {
         ruleType = 'geoip';
         const normTarget = targetLower.replace(/\s*,\s*/g, ', ');
         const found = GEOIP_PRESETS.find(p => p.value.toLowerCase().replace(/\s*,\s*/g, ', ') === normTarget);
@@ -430,14 +433,21 @@ createApp({
           geoipPreset = found.value;
         } else {
           geoipPreset = '__custom__';
-          customTarget = rule.target;
+          customTarget = rawTarget;
         }
-      } else if (rule.target_type === 'ip' || rule.match_type === 'cidr' || targetLower.includes('/') || /^[\d.:]+$/.test(targetLower)) {
+      } else if (
+        rule.target_type === 'ip' || 
+        rule.rule_type === 'ip' || 
+        rule.match_type === 'cidr' || 
+        cleanTarget.includes('/') || 
+        cleanTarget.includes(':') ||
+        /^[\d.:a-fA-F]+$/.test(cleanTarget)
+      ) {
         ruleType = 'cidr';
-        target = rule.target;
+        target = cleanTarget;
       } else {
         ruleType = 'domain';
-        target = rule.target;
+        target = cleanTarget;
       }
 
       modal.value = {
@@ -445,6 +455,8 @@ createApp({
         isEdit: true,
         ruleType,
         oldTarget: rule.target,
+        oldMatchType: rule.match_type,
+        oldAction: rule.action,
         target,
         geositePreset,
         geoipPreset,
@@ -491,7 +503,7 @@ createApp({
       let matchType = 'domain';
 
       if (modal.value.ruleType === 'domain') {
-        targetValue = modal.value.target.trim();
+        targetValue = modal.value.target.trim().replace(/^["']+|["']+$/g, '');
         targetType = 'domain';
         matchType = modal.value.match_type;
         if (!targetValue) {
@@ -523,7 +535,7 @@ createApp({
           return;
         }
       } else if (modal.value.ruleType === 'cidr') {
-        targetValue = modal.value.target.trim();
+        targetValue = modal.value.target.trim().replace(/^["']+|["']+$/g, '');
         targetType = 'ip';
         matchType = 'cidr';
         if (!targetValue) {
@@ -543,6 +555,8 @@ createApp({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               old_target: modal.value.oldTarget,
+              old_match_type: modal.value.oldMatchType,
+              old_action: modal.value.oldAction,
               new_target: targetValue,
               new_match_type: matchType,
               new_action: modal.value.action,
@@ -754,10 +768,17 @@ createApp({
       }
     };
 
-    const deleteRule = async (target) => {
+    const deleteRule = async (ruleOrTarget) => {
+      const isObj = typeof ruleOrTarget === 'object' && ruleOrTarget !== null;
+      const target = isObj ? ruleOrTarget.target : ruleOrTarget;
+      const matchType = isObj ? (ruleOrTarget.match_type || '') : '';
+      const action = isObj ? (ruleOrTarget.action || '') : '';
       if (!confirm(`确定要从 v2rayA 中删除规则 ${target} 吗？`)) return;
       try {
-        await fetch(`/api/rules?target=${encodeURIComponent(target)}`, { method: 'DELETE' });
+        let url = `/api/rules?target=${encodeURIComponent(target)}`;
+        if (matchType) url += `&match_type=${encodeURIComponent(matchType)}`;
+        if (action) url += `&action=${encodeURIComponent(action)}`;
+        await fetch(url, { method: 'DELETE' });
         showToast(`已删除: ${target}`);
         fetchRules();
       } catch (e) {

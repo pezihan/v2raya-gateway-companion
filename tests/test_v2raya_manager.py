@@ -232,4 +232,131 @@ def test_add_and_update_with_category(tmp_path):
     updated = next(r for r in rules2 if r["target"] == "geosite:google")
     assert updated["category"] == "常用海外网站"
 
+def test_user_full_config_support(tmp_path):
+    user_conf = """# =========================================================
+# 默认规则
+# =========================================================
+
+default: direct
+
+
+# =========================================================
+# 强制直连
+# =========================================================
+
+domain(full:mail.qq.com) -> direct
+
+
+# =========================================================
+# 自定义需要代理的域名
+# =========================================================
+
+# Telegram
+domain(full:telegram.org) -> proxy
+domain(domain:telegram.org) -> proxy
+domain(full:web.telegram.org) -> proxy
+domain(domain:web.telegram.org) -> proxy
+domain(full:telegram.me) -> proxy
+domain(domain:telegram.me) -> proxy
+domain(full:t.me) -> proxy
+domain(domain:t.me) -> proxy
+domain(full:telegram.dog) -> proxy
+
+# 其他自定义域名
+domain(domain:gpt.eacase.de5.net) -> proxy
+domain(domain:api.x.com) -> proxy
+domain(domain:x.com) -> proxy
+domain(domain:twitter.com) -> proxy
+domain(domain:twimg.com) -> proxy
+domain(domain:t.co) -> proxy
+domain(domain:pornhub.com) -> proxy
+domain(domain:phncdn.com) -> proxy
+domain(domain:jable.tv) -> proxy
+domain(domain:google.com) -> proxy
+domain(domain:youtube.com) -> proxy
+domain(domain:googlevideo.com) -> proxy
+domain(domain:ytimg.com) -> proxy
+domain(domain:ggpht.com) -> proxy
+domain(domain:github.com) -> proxy
+domain(domain:githubassets.com) -> proxy
+domain(domain:githubusercontent.com) -> proxy
+domain(domain:openai.com) -> proxy
+domain(domain:chatgpt.com) -> proxy
+domain(domain:oaistatic.com) -> proxy
+domain(domain:oaiusercontent.com) -> proxy
+domain(domain:anthropic.com) -> proxy
+domain(domain:claude.ai) -> proxy
+
+# Telegram IP段
+ip(91.108.4.0/22) -> proxy
+ip(91.108.8.0/22) -> proxy
+ip(91.108.12.0/22) -> proxy
+ip(91.108.16.0/22) -> proxy
+ip(91.108.20.0/22) -> proxy
+ip(91.108.56.0/22) -> proxy
+ip(149.154.160.0/20) -> proxy
+ip(149.154.164.0/22) -> proxy
+ip(149.154.168.0/22) -> proxy
+ip(149.154.172.0/22) -> proxy
+ip("2001:b28:f23c::/48") -> proxy
+ip("2a0a:f280::/32") -> proxy
+ip("2001:67c:4e8::/48") -> proxy
+
+# GFWList
+domain(ext:"LoyalsoldierSite.dat:gfw") -> proxy
+
+# 常用被墙网站分类
+domain(geosite:google) -> proxy
+domain(geosite:github) -> proxy
+domain(geosite:telegram) -> proxy
+domain(geosite:twitter) -> proxy
+domain(geosite:gfw) -> proxy
+
+# 境外常用直连
+ip(geoip:hk, geoip:mo) -> proxy
+
+# 保证国内直连
+domain(geosite:cn) -> direct
+ip(geoip:private, geoip:cn) -> direct
+"""
+    conf_file = tmp_path / "routinga.conf"
+    conf_file.write_text(user_conf, encoding="utf-8")
+
+    mgr = V2RayAManager()
+    mgr.backup_path = str(conf_file)
+    mgr.db_path = "/nonexistent/path/db.sqlite"
+
+    rules = mgr.parse_rules()
+    assert len(rules) == 56
+
+    # Verify IPv6 parsing cleans quotes for UI presentation
+    v6_rule = next(r for r in rules if "2001:b28:f23c::/48" in r["target"])
+    assert v6_rule["target"] == "2001:b28:f23c::/48"
+    assert v6_rule["rule_type"] == "ip"
+    assert v6_rule["match_type"] == "cidr"
+    assert v6_rule["target_type"] == "ip"
+
+    # Verify IPv4 CIDR
+    v4_rule = next(r for r in rules if r["target"] == "91.108.4.0/22")
+    assert v4_rule["rule_type"] == "ip"
+    assert v4_rule["match_type"] == "cidr"
+
+    # Verify updating IPv6 rule properly wraps in quotes in saved RoutingA
+    mgr.update_rule(
+        old_target="2001:b28:f23c::/48",
+        new_target="2001:b28:f23c::/48",
+        new_match_type="cidr",
+        new_action="direct",
+        target_type="ip"
+    )
+    raw_after = mgr.get_raw_routinga()
+    assert 'ip("2001:b28:f23c::/48") -> direct' in raw_after
+
+    # Verify deleting specific rule with match_type (full vs domain)
+    mgr.delete_rule(target="telegram.org", match_type="full", action="proxy")
+    raw_after_del = mgr.get_raw_routinga()
+    assert "domain(full:telegram.org) -> proxy" not in raw_after_del
+    assert "domain(domain:telegram.org) -> proxy" in raw_after_del
+
+
 

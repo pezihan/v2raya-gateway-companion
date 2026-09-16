@@ -134,7 +134,14 @@ def format_routinga_rule(
 
     # 1. IP rule types (target_type is ip, or starts with geoip:, or is an IP/CIDR)
     if target_type == "ip" or match_type in ["geoip", "cidr", "ip"] or t_lower.startswith("geoip:"):
-        return f"ip({t}) -> {act}"
+        if t_lower.startswith("geoip:"):
+            return f"ip({t}) -> {act}"
+        clean_ip = t.strip('"\'')
+        # IPv6 addresses in v2rayA RoutingA require double quotes because of colons
+        if ":" in clean_ip:
+            return f'ip("{clean_ip}") -> {act}'
+        else:
+            return f"ip({clean_ip}) -> {act}"
 
     # 2. GeoSite preset: domain(geosite:cn) -> direct
     if t_lower.startswith("geosite:"):
@@ -146,11 +153,13 @@ def format_routinga_rule(
 
     # 4. Keyword / Regex / Full match types
     if match_type in ["full", "keyword", "regexp"]:
-        return f"domain({match_type}:{t_lower}) -> {act}"
+        clean_domain = t_lower.strip('"\'')
+        return f"domain({match_type}:{clean_domain}) -> {act}"
 
     # 5. Default domain match
     if t_lower.startswith("domain:"):
         return f"domain({t_lower}) -> {act}"
 
-    return f"domain(domain:{t_lower}) -> {act}"
+    clean_domain = t_lower.strip('"\'')
+    return f"domain(domain:{clean_domain}) -> {act}"
 

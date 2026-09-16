@@ -157,6 +157,8 @@ class UpdateRuleRequest(BaseModel):
     new_action: str = "proxy"
     new_category: Optional[str] = None
     target_type: Optional[str] = None
+    old_match_type: Optional[str] = None
+    old_action: Optional[str] = None
 
 class RawRuleRequest(BaseModel):
     content: str
@@ -314,15 +316,21 @@ async def update_rule(req: UpdateRuleRequest):
         new_match_type=match_type,
         new_action=req.new_action,
         new_category=req.new_category,
-        target_type=target_type
+        target_type=target_type,
+        old_match_type=req.old_match_type,
+        old_action=req.old_action
     )
     reload_res = await v2raya_manager.reload_v2raya()
     await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
     return {"success": success, "new_target": new_target, "new_domain": new_target, "reload": reload_res}
 
 @app.delete("/api/rules")
-async def delete_rule(target: str):
-    success = v2raya_manager.delete_rule_by_target(target)
+async def delete_rule(
+    target: str,
+    match_type: Optional[str] = None,
+    action: Optional[str] = None
+):
+    success = v2raya_manager.delete_rule(target=target, match_type=match_type, action=action)
     reload_res = await v2raya_manager.reload_v2raya()
     await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
     return {"success": success, "reload": reload_res}

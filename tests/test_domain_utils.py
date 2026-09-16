@@ -30,3 +30,17 @@ def test_analyze_domain():
 def test_format_routinga_rule():
     assert format_routinga_rule("google.com", "proxy", "domain") == "domain(domain:google.com) -> proxy"
     assert format_routinga_rule("mail.qq.com", "direct", "full") == "domain(full:mail.qq.com) -> direct"
+    # IPv4 CIDR
+    assert format_routinga_rule("91.108.4.0/22", "proxy", "cidr", "ip") == "ip(91.108.4.0/22) -> proxy"
+    # IPv6 with or without quotes
+    assert format_routinga_rule("2001:b28:f23c::/48", "proxy", "cidr", "ip") == 'ip("2001:b28:f23c::/48") -> proxy'
+    assert format_routinga_rule('"2001:b28:f23c::/48"', "proxy", "cidr", "ip") == 'ip("2001:b28:f23c::/48") -> proxy'
+    # GeoIP
+    assert format_routinga_rule("geoip:hk, geoip:mo", "proxy", "geoip", "ip") == "ip(geoip:hk, geoip:mo) -> proxy"
+    assert format_routinga_rule("geoip:private, geoip:cn", "direct", "geoip", "ip") == "ip(geoip:private, geoip:cn) -> direct"
+    # GeoSite
+    assert format_routinga_rule("geosite:google", "proxy", "geosite", "domain") == "domain(geosite:google) -> proxy"
+    assert format_routinga_rule("geosite:cn", "direct", "geosite", "domain") == "domain(geosite:cn) -> direct"
+    # Ext DAT
+    assert format_routinga_rule('ext:"LoyalsoldierSite.dat:gfw"', "proxy", "ext", "domain") == 'domain(ext:"LoyalsoldierSite.dat:gfw") -> proxy'
+

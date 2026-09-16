@@ -490,9 +490,11 @@ class V2RayAManager:
                     if target_value.lower().startswith("geoip:"):
                         rule_type = "geoip"
                         match_type = "geoip"
+                        clean_target = target_value
                     else:
                         rule_type = "ip"
                         match_type = "cidr" if ("/" in target_value or ":" in target_value) else "ip"
+                        clean_target = target_value.strip('"\'')
                     has_www = False
                     is_sub = False
                     suggested_root = None
@@ -500,21 +502,24 @@ class V2RayAManager:
                     if target_value.lower().startswith("geosite:"):
                         rule_type = "geosite"
                         match_type = "geosite"
+                        clean_target = target_value
                         has_www = False
                         is_sub = False
                         suggested_root = None
                     elif target_value.lower().startswith("ext:"):
                         rule_type = "ext"
                         match_type = "ext"
+                        clean_target = target_value
                         has_www = False
                         is_sub = False
                         suggested_root = None
                     else:
                         rule_type = "domain"
                         match_type = raw_prefix if raw_prefix in ["full", "keyword", "regexp"] else "domain"
-                        has_www = target_value.lower().startswith("www.")
-                        root_domain = get_root_domain(target_value)
-                        is_sub = (target_value.lower() != root_domain.lower()) and (not re.match(r'^\d+\.\d+\.\d+\.\d+$', target_value))
+                        clean_target = target_value.strip('"\'')
+                        has_www = clean_target.lower().startswith("www.")
+                        root_domain = get_root_domain(clean_target)
+                        is_sub = (clean_target.lower() != root_domain.lower()) and (not re.match(r'^\d+\.\d+\.\d+\.\d+$', clean_target))
                         suggested_root = root_domain if is_sub else None
 
                 rules.append({
@@ -523,7 +528,7 @@ class V2RayAManager:
                     "rule_type": rule_type,
                     "target_type": target_type,
                     "match_type": match_type,
-                    "target": target_value,
+                    "target": clean_target,
                     "action": action,
                     "category": current_category,
                     "has_www": has_www,
@@ -617,18 +622,21 @@ class V2RayAManager:
         new_match_type: str = "domain",
         new_action: str = "proxy",
         new_category: Optional[str] = None,
-        target_type: Optional[str] = None
+        target_type: Optional[str] = None,
+        old_match_type: Optional[str] = None,
+        old_action: Optional[str] = None
     ) -> bool:
         """
         Updates an existing rule:
         Modifies target, match_type, action, or moves category.
         """
-        old_clean = re.sub(r'\s*,\s*', ',', old_target.lower().strip())
+        old_clean_target = old_target.strip('"\'')
+        old_clean = re.sub(r'\s*,\s*', ',', old_clean_target.lower().strip())
         new_clean = new_target.strip()
         
         # Detect target_type if not provided
         if not target_type:
-            if new_clean.lower().startswith("geoip:") or "/" in new_clean:
+            if new_clean.lower().startswith("geoip:") or "/" in new_clean or ":" in new_clean:
                 target_type = "ip"
             else:
                 target_type = "domain"
@@ -641,24 +649,50 @@ class V2RayAManager:
         # Find line index and its category
         old_line_idx = -1
         current_rule_cat = "默认分类"
-        
+
+        # Pass 1: Strict match with old_match_type and old_action if given
         for idx, line in enumerate(lines):
             stripped = line.strip()
             if stripped.startswith("#"):
-                comment_text = stripped.lstrip("# \t")
-                if comment_text and not comment_text.startswith("==="):
-                    current_rule_cat = comment_text
                 continue
-
-            if "->" in stripped and not stripped.startswith("#"):
+            if "->" in stripped:
                 line_normalized = re.sub(r'\s*,\s*', ',', stripped.lower())
-                if old_clean in line_normalized or old_target.lower() in stripped.lower():
-                    old_line_idx = idx
-                    break
+                if old_clean in line_normalized:
+                    match_ok = True
+                    if old_match_type:
+                        if old_match_type in ["full", "keyword", "regexp"]:
+                            match_ok = f"{old_match_type}:{old_clean}" in line_normalized
+                        elif old_match_type == "domain":
+                            match_ok = f"domain:{old_clean}" in line_normalized or f"({old_clean})" in line_normalized
+                    action_ok = True
+                    if old_action:
+                        action_ok = line_normalized.endswith(f"-> {old_action.lower()}") or line_normalized.endswith(f"->{old_action.lower()}")
+                    if match_ok and action_ok:
+                        old_line_idx = idx
+                        break
+
+        # Pass 2: Fallback to loose match
+        if old_line_idx == -1:
+            for idx, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if "->" in stripped:
+                    line_normalized = re.sub(r'\s*,\s*', ',', stripped.lower())
+                    if old_clean in line_normalized or old_target.lower() in stripped.lower():
+                        old_line_idx = idx
+                        break
 
         if old_line_idx == -1:
             # Fallback: add rule
             return self.add_rule(new_clean, new_action, new_match_type, target_type, new_category or "自定义代理")
+
+        # Determine category of old_line_idx
+        for idx in range(old_line_idx - 1, -1, -1):
+            s = lines[idx].strip()
+            if s.startswith("#") and not s.startswith("# ==="):
+                current_rule_cat = s.lstrip("# \t")
+                break
 
         # If new_category is specified and different from current category, remove old and insert into new
         if new_category and new_category.strip().lower() != current_rule_cat.strip().lower():
@@ -669,20 +703,38 @@ class V2RayAManager:
             lines[old_line_idx] = new_rule_str
             return self.save_raw_routinga("\n".join(lines))
 
-    def delete_rule_by_target(self, target: str) -> bool:
-        """Deletes any rule matching target domain/IP"""
-        target_clean = re.sub(r'\s*,\s*', ',', target.lower().strip())
+    def delete_rule(self, target: str, match_type: Optional[str] = None, action: Optional[str] = None) -> bool:
+        """Deletes rule matching target, and optionally match_type and action"""
+        clean_target = target.strip('"\'')
+        target_clean_norm = re.sub(r'\s*,\s*', ',', clean_target.lower().strip())
         raw_text = self.get_raw_routinga()
         lines = raw_text.splitlines()
         new_lines = []
+        deleted = False
+
         for line in lines:
             stripped = line.strip()
-            if not stripped.startswith("#") and "->" in stripped:
+            if not stripped.startswith("#") and "->" in stripped and not deleted:
                 line_norm = re.sub(r'\s*,\s*', ',', stripped.lower())
-                if target_clean in line_norm or target.lower().strip() in stripped.lower():
-                    continue
+                if clean_target in line_norm or target_clean_norm in line_norm:
+                    match_ok = True
+                    if match_type:
+                        if match_type in ["full", "keyword", "regexp"]:
+                            match_ok = f"{match_type}:{clean_target.lower()}" in line_norm
+                        elif match_type == "domain":
+                            match_ok = f"domain:{clean_target.lower()}" in line_norm or f"({clean_target.lower()})" in line_norm
+                    action_ok = True
+                    if action:
+                        action_ok = line_norm.endswith(f"-> {action.lower()}") or line_norm.endswith(f"->{action.lower()}")
+                    if match_ok and action_ok:
+                        deleted = True
+                        continue
             new_lines.append(line)
         return self.save_raw_routinga("\n".join(new_lines))
+
+    def delete_rule_by_target(self, target: str) -> bool:
+        """Deletes any rule matching target domain/IP (backward compatible)"""
+        return self.delete_rule(target=target)
 
     def audit_rules(self) -> Dict:
         """
