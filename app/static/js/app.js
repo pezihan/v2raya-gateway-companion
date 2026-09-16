@@ -58,6 +58,9 @@ createApp({
             showToast(`🚨 捕获到被墙请求: ${msg.data.domain}`, 'error');
           } else if (msg.type === 'RULES_UPDATED') {
             fetchRules();
+            if (msg.source === 'v2rayA_auto_sync') {
+              showToast('⚡ 检测到 v2rayA 规则变动，已自动同步！');
+            }
           } else if (msg.type === 'MONITOR_STATUS_CHANGED') {
             monitorStatus.value = msg.data;
           } else if (msg.type === 'ALERTS_CLEARED') {
@@ -462,12 +465,21 @@ createApp({
       return d.toLocaleTimeString();
     };
 
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        fetchRules();
+      }
+    };
+
     onMounted(() => {
       connectWebSocket();
       fetchDevices();
       fetchStatus();
       fetchAlerts();
       fetchRules();
+
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      window.addEventListener('focus', fetchRules);
 
       timerInterval = setInterval(() => {
         if (monitorStatus.value.is_running) {
@@ -479,6 +491,8 @@ createApp({
     onUnmounted(() => {
       if (ws) ws.close();
       if (timerInterval) clearInterval(timerInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', fetchRules);
     });
 
     return {

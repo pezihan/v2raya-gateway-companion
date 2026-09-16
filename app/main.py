@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import asyncio
 import json
 from typing import Optional, List, Dict
@@ -12,8 +13,6 @@ from app.gfw_prober import prober
 from app.v2raya_manager import v2raya_manager
 from app.sniffer import sniffer
 from app.lan_scanner import get_lan_devices
-
-app = FastAPI(title="v2rayA Gateway Companion", version="1.0.0")
 
 # WebSocket Connection Manager
 class ConnectionManager:
@@ -36,6 +35,33 @@ class ConnectionManager:
                 self.disconnect(connection)
 
 ws_manager = ConnectionManager()
+
+async def v2raya_auto_sync_loop():
+    """Background task checking for external v2rayA rule changes every 4 seconds"""
+    while True:
+        try:
+            await asyncio.sleep(4)
+            if v2raya_manager.check_for_external_changes():
+                await ws_manager.broadcast({
+                    "type": "RULES_UPDATED",
+                    "source": "v2rayA_auto_sync"
+                })
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(4)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    sync_task = asyncio.create_task(v2raya_auto_sync_loop())
+    yield
+    sync_task.cancel()
+    try:
+        await sync_task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(title="v2rayA Gateway Companion", version="1.0.0", lifespan=lifespan)
 
 # Hook sniffer callback to WebSocket broadcast
 async def on_sniffer_alert(alert: dict):

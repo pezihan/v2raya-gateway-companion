@@ -48,9 +48,13 @@
                 v2rayA Gateway Companion
               </h1>
               <!-- Storage badge -->
-              <span class="hidden sm:inline-flex items-center space-x-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+              <span class="hidden sm:inline-flex items-center space-x-1.5 px-2.5 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" title="后台每4秒自动检测并双向同步 v2rayA 规则">
+                <span class="relative flex h-1.5 w-1.5">
+                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                </span>
                 <span>{{ storageInfo.storage_mode || '已对接 v2rayA' }}</span>
+                <span class="text-emerald-300/80 font-normal">· 实时自动同步中</span>
               </span>
             </div>
             <p class="text-xs text-slate-400">旁路网关智能分流 & 规则零差错管理面板</p>

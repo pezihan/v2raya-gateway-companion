@@ -118,3 +118,38 @@ def test_audit_and_auto_fix(tmp_path):
     targets = [r["target"] for r in fixed_rules]
     assert "pornhub.com" in targets
     assert "www.pornhub.com" not in targets
+
+def test_check_for_external_changes(tmp_path):
+    import sqlite3
+    import time
+
+    db_file = tmp_path / "v2raya.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("CREATE TABLE configure (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO configure VALUES ('routingA', 'domain(domain:init.com) -> proxy')")
+    conn.commit()
+    conn.close()
+
+    conf_file = tmp_path / "routinga.conf"
+    mgr = V2RayAManager()
+    mgr.db_path = str(db_file)
+    mgr.backup_path = str(conf_file)
+    mgr._get_candidate_paths = lambda: [str(db_file)]
+    mgr._update_recorded_mtimes()
+    mgr.get_raw_routinga()
+
+    # Without external changes
+    assert mgr.check_for_external_changes() is False
+
+    # Simulate external change by v2rayA
+    time.sleep(0.05)
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("UPDATE configure SET value = 'domain(domain:updated-by-v2raya.com) -> proxy' WHERE key = 'routingA'")
+    conn.commit()
+    conn.close()
+
+    # Should detect change and return True
+    changed = mgr.check_for_external_changes()
+    assert changed is True
+    assert "updated-by-v2raya.com" in mgr.get_raw_routinga()
+

@@ -57,10 +57,68 @@ class V2RayAManager:
         self.db_path = settings.V2RAYA_DB_PATH
         self.backup_path = settings.ROUTINGA_BACKUP_PATH
         self.v2raya_url = settings.V2RAYA_URL.rstrip('/')
+        self._last_mtimes: Dict[str, float] = {}
+        self._cached_content: Optional[str] = None
         os.makedirs(os.path.dirname(self.backup_path) or ".", exist_ok=True)
         if not os.path.exists(self.backup_path):
             with open(self.backup_path, "w", encoding="utf-8") as f:
                 f.write(DEFAULT_ROUTINGA_TEMPLATE)
+        self._update_recorded_mtimes()
+
+    def _get_candidate_paths(self) -> List[str]:
+        candidates = [
+            self.db_path,
+            "/etc/v2raya/bolt.db",
+            "/etc/v2raya/boltv4.db",
+            "/root/.config/v2raya/v2raya.db"
+        ]
+        v2raya_dir = os.path.dirname(self.db_path)
+        if os.path.exists(v2raya_dir):
+            try:
+                for f in os.listdir(v2raya_dir):
+                    fp = os.path.join(v2raya_dir, f)
+                    if fp not in candidates and os.path.isfile(fp):
+                        candidates.append(fp)
+            except Exception:
+                pass
+        return candidates
+
+    def _update_recorded_mtimes(self):
+        mtimes = {}
+        for p in self._get_candidate_paths():
+            if os.path.exists(p):
+                try:
+                    mtimes[p] = os.path.getmtime(p)
+                except Exception:
+                    pass
+        self._last_mtimes = mtimes
+
+    def check_for_external_changes(self) -> bool:
+        """
+        Checks if v2rayA files have been modified externally.
+        Returns True if new content was detected and loaded.
+        """
+        current_mtimes = {}
+        for p in self._get_candidate_paths():
+            if os.path.exists(p):
+                try:
+                    current_mtimes[p] = os.path.getmtime(p)
+                except Exception:
+                    pass
+
+        if not self._last_mtimes:
+            self._last_mtimes = current_mtimes
+            return False
+
+        if current_mtimes != self._last_mtimes:
+            self._last_mtimes = current_mtimes
+            new_content = self._read_from_sqlite()
+            if new_content and new_content != self._cached_content:
+                self._cached_content = new_content
+                with open(self.backup_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                return True
+        return False
 
     def _locate_db_target(self, conn: sqlite3.Connection) -> Optional[Tuple[str, str, str, str]]:
         """
@@ -219,7 +277,9 @@ class V2RayAManager:
     def force_sync_from_v2raya(self) -> Dict:
         """Forces a re-scan of v2rayA database to pull latest changes made in v2rayA UI"""
         content = self._read_from_sqlite()
+        self._update_recorded_mtimes()
         if content:
+            self._cached_content = content
             with open(self.backup_path, "w", encoding="utf-8") as f:
                 f.write(content)
             return {"success": True, "source": "v2rayA 数据库", "length": len(content)}
@@ -229,19 +289,26 @@ class V2RayAManager:
         """Gets current raw RoutingA configuration string"""
         content = self._read_from_sqlite()
         if content:
+            self._cached_content = content
             return content
         if os.path.exists(self.backup_path):
             with open(self.backup_path, "r", encoding="utf-8") as f:
-                return f.read()
+                content = f.read()
+                self._cached_content = content
+                return content
+        self._cached_content = DEFAULT_ROUTINGA_TEMPLATE
         return DEFAULT_ROUTINGA_TEMPLATE
 
     def save_raw_routinga(self, content: str) -> bool:
         """Saves raw RoutingA string to DB & file"""
+        self._cached_content = content
         # Save to backup file
         with open(self.backup_path, "w", encoding="utf-8") as f:
             f.write(content)
         # Save to SQLite
         self._save_to_sqlite(content)
+        # Update recorded mtimes so our own write doesn't trigger false external detection
+        self._update_recorded_mtimes()
         return True
 
     def parse_rules(self) -> List[Dict]:
