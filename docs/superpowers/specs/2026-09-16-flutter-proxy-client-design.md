@@ -91,13 +91,19 @@ sing-box 路由表的规则判定严格遵循**自顶向下、首次命中原则
    - **TCP RST 阻断**：直连出站尝试与目标服务器建立三次握手时，在发送 SYN 后立即收到远端返回的 TCP RST 标志位（GFW 防火墙伪造响应的绝对特征）。
    - **三次握手超时**：在设备整体网络正常的前提下，针对特定海外目标域名的直连 SYN 包重传 3 次超时未响应。
    - **TLS SNI 阻断**：TCP 握手成功，但在发出含有明文 SNI 的 TLS ClientHello 后，连接瞬间被中间人重置或切断。
-2. **处理流程**：
-   - sing-box 监控直连出站错误，通过 EventChannel / IPC 向 Flutter 应用层发出报警事件：`{ domain: "notion.so", reason: "TCP_RST", target_ip: "104.18.x.x", timestamp: 1726470000 }`。
-   - Flutter 接收后，自动启动后台影子校验（Shadow Verification）：使用当前选中的代理节点发起一次极简 HTTP HEAD 探针。
+2. **根域名智能提取 (eTLD+1 Apex Domain Extraction)**：
+   - 当嗅探到具体访问的子域名（例如 `www.google.com` 或 `api.notion.so`）遭阻断时，客户端内置公共后缀列表（Public Suffix List, PSL）算法，**默认提取其根域名（Apex Domain, 如 `google.com`、`notion.so`）**。
+   - 规则类型采用 sing-box 的 **`domain_suffix`** 匹配模式。这样只需添加一次 `google.com`，其下属的所有二级、三级域名（如 `accounts.google.com`、`mail.google.com`、`play.google.com` 等）均会自动走代理通道。
+   - 智能建议卡片与浏览器扩展弹窗中提供快捷切换 Chip：
+     - `[• 根域名 *.google.com (默认推荐)]`  `[ 精确子域名 www.google.com ]`
+     - 兼顾多租户平台场景（例如访问 `user.github.io` 时，用户可按需选择仅代理单点或全局代理）。
+3. **处理流程**：
+   - sing-box 监控直连出站错误，通过 EventChannel / IPC 向 Flutter 应用层发出报警事件：`{ domain: "www.notion.so", reason: "TCP_RST", target_ip: "104.18.x.x", timestamp: 1726470000 }`。
+   - Flutter 接收后，自动提取根域名 `notion.so` 并启动后台影子校验（Shadow Verification）：使用当前选中的代理节点发起极简 HTTP HEAD 探针。
    - 若代理成功且直连失败，在客户端首页呈现**智能建议卡片**：
-     - *“检测到 `notion.so` 直连遭到拦截阻断 (确信度 100%)”*
-     - 提供三个动作按钮：**[ 一键加入代理 ]**、**[ 仅本次代理 ]**、**[ 忽略/放行 ]**。
-   - 用户点击 **[ 一键加入代理 ]** 后，该域名即刻写入持久化数据库，并触发热重载，下一次访问立即畅通。
+     - *“检测到 `www.notion.so` 直连遭到拦截阻断 (确信度 100%)，建议添加根域名 `*.notion.so`”*
+     - 提供动作按钮：**[ 一键加入根域名代理 ]**、**[ 仅本次代理 ]**、**[ 忽略/放行 ]**。
+   - 用户点击 **[ 一键加入根域名代理 ]** 后，`notion.so` (domain_suffix) 即刻写入持久化数据库，并触发热重载，所有子域名访问立即畅通。
 
 ### 3.3 浏览器扩展联动架构
 
