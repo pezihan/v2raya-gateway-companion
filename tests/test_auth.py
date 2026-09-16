@@ -4,12 +4,19 @@ from app.main import app
 from app.config import settings
 from app.auth import verify_password, verify_token, generate_auth_token
 
+@pytest.fixture(autouse=True)
+def setup_test_auth():
+    orig_pwd = settings.AUTH_PASSWORD
+    settings.AUTH_PASSWORD = "test_secret_password"
+    yield
+    settings.AUTH_PASSWORD = orig_pwd
+
 @pytest.fixture
 def client():
     return TestClient(app)
 
 def test_auth_token_logic():
-    pwd = "433127"
+    pwd = "test_secret_password"
     token = generate_auth_token(pwd)
     assert token is not None
     assert len(token) == 64  # SHA256 hex length
@@ -35,7 +42,7 @@ def test_auth_api_flow(client):
     assert resp.status_code == 400
 
     # 4. Login with correct password -> 200 + token
-    resp = client.post("/api/auth/login", json={"password": "433127"})
+    resp = client.post("/api/auth/login", json={"password": "test_secret_password"})
     assert resp.status_code == 200
     login_data = resp.json()
     assert login_data["success"] is True
@@ -90,4 +97,24 @@ def test_rules_api_with_geosite_and_geoip(client):
     assert any("geoip:hk" in r["target"] for r in rules)
     assert any(r["target"] == "geosite:netflix" for r in rules)
     assert "流媒体服务" in resp.json()["categories"]
+
+    # 5. Verify adding rule without category fails with 400
+    bad_add = client.post("/api/rules/add", headers=headers, json={
+        "target": "example.com",
+        "action": "proxy",
+        "category": ""
+    })
+    assert bad_add.status_code == 400
+
+    # 6. Verify category reorder endpoint
+    cats = resp.json().get("ordered_categories", [])
+    if len(cats) >= 2:
+        reversed_cats = list(reversed(cats))
+        reorder_resp = client.post("/api/categories/reorder", headers=headers, json={
+            "order": reversed_cats
+        })
+        assert reorder_resp.status_code == 200
+        assert reorder_resp.json()["success"] is True
+        assert reorder_resp.json()["ordered_categories"][0] == reversed_cats[0]
+
 

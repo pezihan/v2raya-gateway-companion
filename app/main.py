@@ -109,7 +109,8 @@ async def get_auth_status(request: Request):
 async def auth_login(req: LoginRequest, response: Response):
     if not verify_password(req.password):
         raise HTTPException(status_code=400, detail="密码错误，请重新输入")
-    token = generate_auth_token(settings.AUTH_PASSWORD)
+    v2raya_manager.set_active_password(req.password)
+    token = generate_auth_token(settings.AUTH_PASSWORD or req.password)
     response.set_cookie(
         key="auth_token",
         value=token,
@@ -149,6 +150,10 @@ class AddRuleRequest(BaseModel):
     match_type: str = "domain" # domain, full, keyword, regexp, geosite, geoip, cidr, ext
     target_type: str = "domain" # domain, ip
     category: str = "自定义代理"
+
+class CategoryReorderRequest(BaseModel):
+    order: Optional[List[str]] = None
+    category_order: Optional[List[str]] = None
 
 class UpdateRuleRequest(BaseModel):
     old_target: str
@@ -211,23 +216,43 @@ async def api_check_domain(req: CheckDomainRequest):
 @app.get("/api/rules")
 async def get_rules():
     parsed = v2raya_manager.parse_rules()
-    categories = []
-    seen = set()
+    ordered_categories = v2raya_manager.get_ordered_categories()
+    seen = set(ordered_categories)
+    categories = list(ordered_categories)
     for r in parsed:
         cat = r.get("category")
-        if cat and cat not in seen:
+        if cat and cat not in ["默认规则", "系统策略"] and cat not in seen:
             seen.add(cat)
             categories.append(cat)
     return {
         "rules": parsed,
         "categories": categories,
+        "ordered_categories": categories,
         "raw": v2raya_manager.get_raw_routinga(),
         "audit": v2raya_manager.audit_rules(),
         "storage": v2raya_manager.get_sync_status()
     }
 
+@app.post("/api/categories/reorder")
+async def api_reorder_categories(req: CategoryReorderRequest):
+    order = req.order or req.category_order
+    if not order:
+        raise HTTPException(status_code=400, detail="分类排序列表不能为空")
+    success = v2raya_manager.reorder_categories(order)
+    reload_res = await v2raya_manager.reload_v2raya()
+    await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
+    return {
+        "success": success,
+        "ordered_categories": v2raya_manager.get_ordered_categories(),
+        "reload": reload_res
+    }
+
 @app.post("/api/rules/add")
 async def add_rule(req: AddRuleRequest):
+    category = (req.category or "").strip()
+    if not category:
+        raise HTTPException(status_code=400, detail="必须选择或指定规则归属分类 (Category)")
+
     raw_val = (req.target or req.domain or "").strip()
     if not raw_val:
         raise HTTPException(status_code=400, detail="目标不能为空")
@@ -261,7 +286,7 @@ async def add_rule(req: AddRuleRequest):
         action=req.action,
         match_type=match_type,
         target_type=target_type,
-        category=req.category
+        category=category
     )
     
     reload_res = await v2raya_manager.reload_v2raya()
@@ -286,6 +311,9 @@ async def update_rule(req: UpdateRuleRequest):
     raw_val = req.new_target.strip()
     if not raw_val:
         raise HTTPException(status_code=400, detail="新目标不能为空")
+
+    if req.new_category is not None and not req.new_category.strip():
+        raise HTTPException(status_code=400, detail="规则归属分类不能为空")
 
     target_type = req.target_type or ("ip" if raw_val.lower().startswith("geoip:") or "/" in raw_val else "domain")
     match_type = req.new_match_type or "domain"
@@ -315,7 +343,7 @@ async def update_rule(req: UpdateRuleRequest):
         new_target=new_target,
         new_match_type=match_type,
         new_action=req.new_action,
-        new_category=req.new_category,
+        new_category=req.new_category.strip() if req.new_category else None,
         target_type=target_type,
         old_match_type=req.old_match_type,
         old_action=req.old_action

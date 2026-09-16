@@ -53,6 +53,10 @@ createApp({
     const manualAnalysis = ref({});
     const manualProbe = ref(null);
     const manualAction = ref('proxy');
+    const manualCategoryMode = ref('select'); // 'select' | 'new'
+    const manualCategory = ref('自定义代理');
+    const manualNewCategory = ref('');
+    const isAddingManual = ref(false);
     const probing = ref(false);
 
     // Rules tab
@@ -61,22 +65,31 @@ createApp({
     const showRawEditor = ref(false);
     const searchQuery = ref('');
     const ruleAudit = ref({ total_issues: 0, issues: [] });
+    const loadingRules = ref(false);
+    const isReloading = ref(false);
+    const isSyncing = ref(false);
+    const orderedCategories = ref([]);
 
-    // Available categories computed from loaded rules
+    // Sniffer tab default category
+    const snifferCategory = ref('自定义代理');
+
+    // Available categories computed from loaded rules & orderedCategories
     const availableCategories = computed(() => {
-      const cats = new Set();
-      for (const r of rules.value) {
-        if (r.category && r.category !== '系统策略') {
-          cats.add(r.category);
+      const list = [];
+      for (const c of orderedCategories.value) {
+        if (c && c !== '系统策略' && c !== '默认规则' && !list.includes(c)) {
+          list.push(c);
         }
       }
-      if (!cats.size) {
-        cats.add('中国大陆及私有地址直连');
-        cats.add('香港 / 澳门 IP');
-        cats.add('自定义需要代理的域名');
-        cats.add('自定义代理');
+      for (const r of rules.value) {
+        if (r.category && r.category !== '系统策略' && r.category !== '默认规则' && !list.includes(r.category)) {
+          list.push(r.category);
+        }
       }
-      return Array.from(cats);
+      if (!list.length) {
+        list.push('自定义代理', '自定义需要代理的域名', '香港 / 澳门 IP', '中国大陆及私有地址直连');
+      }
+      return list;
     });
 
     // Modal state for Add / Edit
@@ -260,16 +273,25 @@ createApp({
     };
 
     const fetchRules = async () => {
+      loadingRules.value = true;
       try {
         const res = await fetch('/api/rules');
         const data = await res.json();
         rules.value = data.rules || [];
         rawContent.value = data.raw || '';
         ruleAudit.value = data.audit || { total_issues: 0, issues: [] };
+        if (data.ordered_categories) {
+          orderedCategories.value = data.ordered_categories;
+        } else if (data.categories) {
+          orderedCategories.value = data.categories;
+        }
         if (data.storage) {
           storageInfo.value = data.storage;
         }
-      } catch (e) {}
+      } catch (e) {
+      } finally {
+        loadingRules.value = false;
+      }
     };
 
     // Modal Type and Preset Helpers
@@ -545,8 +567,13 @@ createApp({
       }
 
       const categoryValue = modal.value.categoryMode === 'new'
-        ? (modal.value.newCategoryInput.trim() || '自定义代理')
-        : modal.value.category;
+        ? modal.value.newCategoryInput.trim()
+        : (modal.value.category || '').trim();
+
+      if (!categoryValue) {
+        showToast('必须选择或输入规则归属分类 (Category)', 'error');
+        return;
+      }
 
       try {
         if (modal.value.isEdit) {
@@ -741,27 +768,66 @@ createApp({
       }
     };
 
+    const toggleManualCategoryMode = () => {
+      if (manualCategoryMode.value === 'select') {
+        manualCategoryMode.value = 'new';
+        manualNewCategory.value = '';
+      } else {
+        manualCategoryMode.value = 'select';
+        manualCategory.value = availableCategories.value[0] || '自定义代理';
+      }
+    };
+
     const addManualRule = async () => {
       const target = manualAnalysis.value.hostname;
-      if (!target) return;
-      await addRule(target, manualAction.value, manualAnalysis.value.is_subdomain ? 'full' : 'domain');
-      manualInput.value = '';
-      manualAnalysis.value = {};
-      manualProbe.value = null;
+      if (!target) {
+        showToast('请先输入有效的网址或域名', 'error');
+        return;
+      }
+      const categoryVal = manualCategoryMode.value === 'new' 
+        ? manualNewCategory.value.trim() 
+        : (manualCategory.value || '').trim();
+
+      if (!categoryVal) {
+        showToast('必须选择或新建规则归属分类 (Category)', 'error');
+        return;
+      }
+
+      isAddingManual.value = true;
+      try {
+        await addRule(target, manualAction.value, manualAnalysis.value.is_subdomain ? 'full' : 'domain', categoryVal);
+        manualInput.value = '';
+        manualAnalysis.value = {};
+        manualProbe.value = null;
+        if (manualCategoryMode.value === 'new') {
+          manualCategoryMode.value = 'select';
+          manualCategory.value = categoryVal;
+          manualNewCategory.value = '';
+        }
+      } finally {
+        isAddingManual.value = false;
+      }
     };
 
     // Add Rule general
-    const addRule = async (domain, action = 'proxy', match_type = 'domain') => {
+    const addRule = async (domain, action = 'proxy', match_type = 'domain', category = null) => {
+      const cat = category || modal.value.category || availableCategories.value[0] || '自定义代理';
+      if (!cat || !cat.trim()) {
+        showToast('必须指定规则归属分类 (Category)', 'error');
+        return;
+      }
       try {
         const res = await fetch('/api/rules/add', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ domain, action, match_type })
+          body: JSON.stringify({ domain, action, match_type, category: cat.trim() })
         });
         const data = await res.json();
         if (data.success) {
-          showToast(`已成功写入 v2rayA: ${domain}`);
+          showToast(`已成功写入 v2rayA [${cat}]: ${domain}`);
           fetchRules();
+        } else {
+          showToast(data.detail || '添加失败', 'error');
         }
       } catch (e) {
         showToast('添加规则失败', 'error');
@@ -812,16 +878,21 @@ createApp({
     };
 
     const triggerReload = async () => {
+      isReloading.value = true;
       try {
         const res = await fetch('/api/v2ray/reload', { method: 'POST' });
         const data = await res.json();
         showToast(data.message || '已成功通知 v2rayA 重载内核生效！');
+        fetchRules();
       } catch (e) {
-        showToast('重载请求已发送');
+        showToast('重载请求失败', 'error');
+      } finally {
+        isReloading.value = false;
       }
     };
 
     const syncFromV2rayA = async () => {
+      isSyncing.value = true;
       try {
         const res = await fetch('/api/rules/sync', { method: 'POST' });
         const data = await res.json();
@@ -833,18 +904,103 @@ createApp({
         }
       } catch (e) {
         showToast('同步失败', 'error');
+      } finally {
+        isSyncing.value = false;
       }
     };
 
-    // Group rules by category
-    const groupedRules = computed(() => {
+    const reorderCategory = async (cat, direction) => {
+      const currentList = [...orderedCategories.value];
+      const idx = currentList.indexOf(cat);
+      if (idx === -1) return;
+
+      if (direction === 'top') {
+        if (idx === 0) return;
+        currentList.splice(idx, 1);
+        currentList.unshift(cat);
+      } else if (direction === 'up') {
+        if (idx <= 0) return;
+        const temp = currentList[idx - 1];
+        currentList[idx - 1] = currentList[idx];
+        currentList[idx] = temp;
+      } else if (direction === 'down') {
+        if (idx >= currentList.length - 1) return;
+        const temp = currentList[idx + 1];
+        currentList[idx + 1] = currentList[idx];
+        currentList[idx] = temp;
+      }
+
+      orderedCategories.value = currentList;
+      try {
+        const res = await fetch('/api/categories/reorder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order: currentList })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast(`已将分类「${cat}」${direction === 'top' ? '置顶' : direction === 'up' ? '上移' : '下移'}，v2rayA 规则已重新排序并即时生效！`);
+          if (data.ordered_categories) {
+            orderedCategories.value = data.ordered_categories;
+          }
+          fetchRules();
+        } else {
+          showToast('排序保存失败', 'error');
+        }
+      } catch (e) {
+        showToast('排序请求失败', 'error');
+      }
+    };
+
+    // Group rules by category in ordered list
+    const groupedCategoryList = computed(() => {
       const q = searchQuery.value.toLowerCase().trim();
-      const groups = {};
+      const ruleMap = {};
       for (const r of rules.value) {
         if (q && !r.target.includes(q)) continue;
         const cat = r.category || '未分类';
-        if (!groups[cat]) groups[cat] = [];
-        groups[cat].push(r);
+        if (!ruleMap[cat]) ruleMap[cat] = [];
+        ruleMap[cat].push(r);
+      }
+
+      const result = [];
+      const handled = new Set();
+      let priority = 1;
+
+      // 1. Traverse strictly by orderedCategories
+      for (const cat of orderedCategories.value) {
+        if (ruleMap[cat] && ruleMap[cat].length) {
+          result.push({
+            category: cat,
+            priority: priority++,
+            rules: ruleMap[cat]
+          });
+          handled.add(cat);
+        }
+      }
+
+      // 2. Any other categories not yet handled
+      for (const cat of Object.keys(ruleMap)) {
+        if (!handled.has(cat)) {
+          result.push({
+            category: cat,
+            priority: priority++,
+            rules: ruleMap[cat]
+          });
+        }
+      }
+      return result;
+    });
+
+    const totalSortedCategories = computed(() => {
+      return groupedCategoryList.value.filter(g => g.category !== '系统策略' && g.category !== '默认规则').length;
+    });
+
+    // Group rules by category (legacy map fallback)
+    const groupedRules = computed(() => {
+      const groups = {};
+      for (const item of groupedCategoryList.value) {
+        groups[item.category] = item.rules;
       }
       return groups;
     });
@@ -942,7 +1098,20 @@ createApp({
       saveRawRules,
       triggerReload,
       syncFromV2rayA,
-      formatTime
+      formatTime,
+      manualCategoryMode,
+      manualCategory,
+      manualNewCategory,
+      isAddingManual,
+      loadingRules,
+      isReloading,
+      isSyncing,
+      orderedCategories,
+      snifferCategory,
+      reorderCategory,
+      groupedCategoryList,
+      totalSortedCategories,
+      toggleManualCategoryMode
     };
   }
 }).mount('#app');

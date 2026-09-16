@@ -63,11 +63,18 @@ class V2RayAManager:
         self._cached_content: Optional[str] = None
         self._v2raya_token: Optional[str] = None
         self._v2raya_token_exp: float = 0
+        self._active_password: Optional[str] = None
         os.makedirs(os.path.dirname(self.backup_path) or ".", exist_ok=True)
         if not os.path.exists(self.backup_path):
             with open(self.backup_path, "w", encoding="utf-8") as f:
                 f.write(DEFAULT_ROUTINGA_TEMPLATE)
         self._update_recorded_mtimes()
+
+    def set_active_password(self, pwd: str):
+        """Allows setting the active v2rayA/Companion session password dynamically"""
+        if pwd:
+            self._active_password = pwd.strip()
+            self._v2raya_token = None  # Invalidate cached token to refresh on next request
 
     def _extract_v2raya_username(self) -> str:
         """Extracts username from /etc/v2raya/bolt.db accounts bucket or fallback"""
@@ -83,7 +90,7 @@ class V2RayAManager:
                             return m.group(1).decode("utf-8")
                 except Exception:
                     pass
-        return os.getenv("V2RAYA_USER", "pezihan")
+        return os.getenv("V2RAYA_USER", "admin")
 
     def _get_v2raya_token(self) -> Optional[str]:
         """Logs into v2rayA REST API using detected credentials and returns JWT token"""
@@ -91,8 +98,10 @@ class V2RayAManager:
         if self._v2raya_token and self._v2raya_token_exp > now + 60:
             return self._v2raya_token
 
-        username = self._extract_v2raya_username()
-        password = getattr(settings, "AUTH_PASSWORD", "433127")
+        username = self._extract_v2raya_username() or os.getenv("V2RAYA_USER", "admin")
+        password = self._active_password or getattr(settings, "AUTH_PASSWORD", "") or os.getenv("V2RAYA_PASSWORD", "")
+        if not password:
+            return None
         try:
             url = f"{self.v2raya_url}/api/login"
             req = urllib.request.Request(
@@ -147,6 +156,68 @@ class V2RayAManager:
         except Exception as e:
             print(f"[v2rayA API PUT error] {e}")
             return False
+
+    def apply_v2raya_setting(self) -> Dict:
+        """
+        Calls v2rayA official REST API PUT /api/setting (Save and Apply)
+        to rebuild /etc/v2raya/config.json and reload Xray/V2Ray core service.
+        """
+        token = self._get_v2raya_token()
+        if not token:
+            return {"success": False, "message": "未获取到 v2rayA 鉴权 Token，已写入本地备份"}
+
+        try:
+            # 1. Fetch current setting object from v2rayA
+            get_req = urllib.request.Request(
+                f"{self.v2raya_url}/api/setting",
+                headers={"Authorization": token}
+            )
+            with urllib.request.urlopen(get_req, timeout=4.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("code") != "SUCCESS":
+                    return {"success": False, "message": f"获取配置失败: {data.get('message')}"}
+                current = data.get("data", {}).get("setting", {})
+
+            # 2. Build complete payload exactly as v2rayA Web UI does
+            payload = {
+                "proxyModeWhenSubscribe": current.get("proxyModeWhenSubscribe", "direct"),
+                "pacAutoUpdateMode": current.get("pacAutoUpdateMode", "auto_update_at_intervals"),
+                "pacAutoUpdateIntervalHour": int(current.get("pacAutoUpdateIntervalHour", 100)),
+                "subscriptionAutoUpdateMode": current.get("subscriptionAutoUpdateMode", "auto_update_at_intervals"),
+                "subscriptionAutoUpdateIntervalHour": int(current.get("subscriptionAutoUpdateIntervalHour", 5)),
+                "pacMode": current.get("pacMode", "routingA"),
+                "tcpFastOpen": current.get("tcpFastOpen", "default"),
+                "inboundSniffing": current.get("inboundSniffing", "http,tls,quic"),
+                "muxOn": current.get("muxOn", "yes"),
+                "mux": int(current.get("mux", 4)),
+                "transparent": current.get("transparent", "pac"),
+                "transparentType": current.get("transparentType", "tproxy"),
+                "ipforward": bool(current.get("ipforward", True)),
+                "portSharing": bool(current.get("portSharing", False)),
+                "dnsforward": "yes" if current.get("antipollution") == "dnsforward" else "no",
+                "antipollution": current.get("antipollution", "closed"),
+                "specialMode": current.get("specialMode", "none")
+            }
+
+            # 3. Call PUT /api/setting to trigger '保存并应用'
+            put_req = urllib.request.Request(
+                f"{self.v2raya_url}/api/setting",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Authorization": token, "Content-Type": "application/json"},
+                method="PUT"
+            )
+            with urllib.request.urlopen(put_req, timeout=6.0) as resp:
+                put_data = json.loads(resp.read().decode("utf-8"))
+                if put_data.get("code") == "SUCCESS":
+                    return {
+                        "success": True,
+                        "reloaded_at": int(time.time()),
+                        "message": "已通知 v2rayA 保存并应用配置，Xray 内核已即时热重载生效！"
+                    }
+                else:
+                    return {"success": False, "message": f"v2rayA 返回错误: {put_data.get('message')}"}
+        except Exception as e:
+            return {"success": False, "message": f"调用 v2rayA 保存并应用 API 失败: {str(e)}"}
 
     def _get_candidate_paths(self) -> List[str]:
         candidates = [
@@ -439,21 +510,165 @@ class V2RayAManager:
         return DEFAULT_ROUTINGA_TEMPLATE
 
     def save_raw_routinga(self, content: str) -> bool:
-        """Saves raw RoutingA string to API, DB & file"""
+        """Saves raw RoutingA string to API, DB & file, and hot-applies to v2rayA"""
         self._cached_content = content
         # Save to backup file
         with open(self.backup_path, "w", encoding="utf-8") as f:
             f.write(content)
 
-        # Priority 1: Save via official v2rayA API (which writes to BoltDB and reloads core!)
+        # Priority 1: Save via official v2rayA API (which writes to BoltDB)
         self._save_via_v2raya_api(content)
 
         # Priority 2: SQLite write if SQLite exists
         self._save_to_sqlite(content)
 
+        # Priority 3: Trigger v2rayA official '保存并应用' so config.json is rebuilt and core reloads
+        self.apply_v2raya_setting()
+
         # Update recorded mtimes so our own write doesn't trigger false external detection
         self._update_recorded_mtimes()
         return True
+
+    def parse_category_sections(self, raw_text: Optional[str] = None) -> List[Dict]:
+        """
+        Parses raw RoutingA text into structured category sections.
+        Each section dict contains:
+          - category: category name
+          - header_lines: banner comment lines
+          - body_lines: rule and inline comment lines
+        """
+        if raw_text is None:
+            raw_text = self.get_raw_routinga()
+        lines = raw_text.splitlines()
+        has_banner = any(re.match(r'^#\s*={3,}$', l.strip()) for l in lines)
+        sections = []
+        i = 0
+        current_cat = None
+        current_header = []
+        current_body = []
+
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            is_header = False
+            cat_name = None
+            header_lines = []
+
+            if has_banner:
+                if stripped.startswith('#') and re.match(r'^#\s*={3,}$', stripped):
+                    if i + 1 < len(lines):
+                        next_s = lines[i+1].strip()
+                        if next_s.startswith('#') and not re.match(r'^#\s*={3,}$', next_s):
+                            cat_candidate = next_s.lstrip('# \t').strip()
+                            if cat_candidate:
+                                cat_name = cat_candidate
+                                header_lines = [lines[i], lines[i+1]]
+                                i += 2
+                                if i < len(lines) and re.match(r'^#\s*={3,}$', lines[i].strip()):
+                                    header_lines.append(lines[i])
+                                    i += 1
+                                is_header = True
+                elif stripped.startswith('#') and not re.match(r'^#\s*={3,}$', stripped):
+                    if i + 1 < len(lines) and re.match(r'^#\s*={3,}$', lines[i+1].strip()):
+                        cat_candidate = stripped.lstrip('# \t').strip()
+                        if cat_candidate:
+                            cat_name = cat_candidate
+                            header_lines = [lines[i], lines[i+1]]
+                            i += 2
+                            is_header = True
+            else:
+                if stripped.startswith('#'):
+                    cand = stripped.lstrip('# \t').strip()
+                    if cand and not cand.startswith('==='):
+                        cat_name = cand
+                        header_lines = [lines[i]]
+                        i += 1
+                        is_header = True
+
+            if is_header:
+                if current_cat is not None or current_body or current_header:
+                    sections.append({
+                        'category': current_cat or '默认分类',
+                        'header_lines': current_header,
+                        'body_lines': current_body
+                    })
+                current_cat = cat_name
+                current_header = header_lines
+                current_body = []
+            else:
+                current_body.append(line)
+                i += 1
+
+        if current_cat is not None or current_body or current_header:
+            sections.append({
+                'category': current_cat or '默认分类',
+                'header_lines': current_header,
+                'body_lines': current_body
+            })
+        return sections
+
+    def get_ordered_categories(self, raw_text: Optional[str] = None) -> List[str]:
+        """Returns the list of categories in their actual order in RoutingA (top-to-bottom)"""
+        sections = self.parse_category_sections(raw_text)
+        ordered = []
+        for s in sections:
+            cat = s["category"]
+            if cat and cat not in ["默认规则", "系统策略", "默认策略"] and cat not in ordered:
+                ordered.append(cat)
+        return ordered
+
+    def reorder_categories(self, category_order: List[str]) -> bool:
+        """
+        Reorders the categories in raw RoutingA according to category_order list.
+        Top categories have higher matching priority.
+        Automatically saves and triggers v2rayA 'Save and Apply'.
+        """
+        raw_text = self.get_raw_routinga()
+        sections = self.parse_category_sections(raw_text)
+        if not sections:
+            return False
+
+        cat_to_section = {s["category"]: s for s in sections}
+        ordered_sections = []
+
+        # 1. Keep system default rule section (like 默认规则 containing 'default: ...') at the very top
+        first_sec = sections[0]
+        has_leading_default = first_sec and (
+            first_sec["category"] in ["默认规则", "系统策略", "默认策略"] or
+            any("default:" in l for l in first_sec.get("body_lines", []))
+        )
+        if has_leading_default and first_sec["category"] not in category_order:
+            ordered_sections.append(first_sec)
+
+        # 2. Place categories in the user-specified order
+        for cat in category_order:
+            if cat in cat_to_section:
+                sec = cat_to_section[cat]
+                if sec not in ordered_sections:
+                    ordered_sections.append(sec)
+
+        # 3. Append any remaining sections that weren't in category_order
+        for s in sections:
+            if s not in ordered_sections:
+                ordered_sections.append(s)
+
+        # 4. Rebuild text
+        output_parts = []
+        for s in ordered_sections:
+            part = []
+            if s["header_lines"]:
+                part.append("\n".join(s["header_lines"]))
+            if s["body_lines"]:
+                body_txt = "\n".join(s["body_lines"]).strip("\n")
+                if body_txt:
+                    part.append(body_txt)
+            out_str = "\n".join(part).strip()
+            if out_str:
+                output_parts.append(out_str)
+
+        new_content = "\n\n\n".join(output_parts) + "\n"
+        return self.save_raw_routinga(new_content)
 
     def parse_rules(self) -> List[Dict]:
         """
@@ -461,97 +676,94 @@ class V2RayAManager:
         Returns a list of rule dicts with detailed audit info.
         """
         raw_text = self.get_raw_routinga()
-        lines = raw_text.splitlines()
+        sections = self.parse_category_sections(raw_text)
         rules = []
-        current_category = "默认分类"
 
         rule_regex = re.compile(r'^(domain|ip)\((domain|full|keyword|regexp)?:?([^)]+)\)\s*->\s*(proxy|direct|block)$', re.IGNORECASE)
+        line_counter = 0
 
-        for line_num, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if not stripped:
-                continue
+        for sec in sections:
+            cat_name = sec["category"]
+            for line in sec.get("body_lines", []):
+                line_counter += 1
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
 
-            if stripped.startswith("#"):
-                comment_text = stripped.lstrip("# \t")
-                if comment_text and not comment_text.startswith("==="):
-                    current_category = comment_text
-                continue
+                match = rule_regex.match(stripped)
+                if match:
+                    target_type = match.group(1).lower() # domain / ip
+                    raw_prefix = match.group(2).lower() if match.group(2) else ""
+                    target_value = match.group(3).strip()
+                    action = match.group(4).lower()
 
-            match = rule_regex.match(stripped)
-            if match:
-                target_type = match.group(1).lower() # domain / ip
-                raw_prefix = match.group(2).lower() if match.group(2) else ""
-                target_value = match.group(3).strip()
-                action = match.group(4).lower()
-
-                # Accurately classify rule_type and match_type
-                if target_type == "ip":
-                    if target_value.lower().startswith("geoip:"):
-                        rule_type = "geoip"
-                        match_type = "geoip"
-                        clean_target = target_value
-                    else:
-                        rule_type = "ip"
-                        match_type = "cidr" if ("/" in target_value or ":" in target_value) else "ip"
-                        clean_target = target_value.strip('"\'')
-                    has_www = False
-                    is_sub = False
-                    suggested_root = None
-                elif target_type == "domain":
-                    if target_value.lower().startswith("geosite:"):
-                        rule_type = "geosite"
-                        match_type = "geosite"
-                        clean_target = target_value
+                    # Accurately classify rule_type and match_type
+                    if target_type == "ip":
+                        if target_value.lower().startswith("geoip:"):
+                            rule_type = "geoip"
+                            match_type = "geoip"
+                            clean_target = target_value
+                        else:
+                            rule_type = "ip"
+                            match_type = "cidr" if ("/" in target_value or ":" in target_value) else "ip"
+                            clean_target = target_value.strip('"\'')
                         has_www = False
                         is_sub = False
                         suggested_root = None
-                    elif target_value.lower().startswith("ext:"):
-                        rule_type = "ext"
-                        match_type = "ext"
-                        clean_target = target_value
-                        has_www = False
-                        is_sub = False
-                        suggested_root = None
-                    else:
-                        rule_type = "domain"
-                        match_type = raw_prefix if raw_prefix in ["full", "keyword", "regexp"] else "domain"
-                        clean_target = target_value.strip('"\'')
-                        has_www = clean_target.lower().startswith("www.")
-                        root_domain = get_root_domain(clean_target)
-                        is_sub = (clean_target.lower() != root_domain.lower()) and (not re.match(r'^\d+\.\d+\.\d+\.\d+$', clean_target))
-                        suggested_root = root_domain if is_sub else None
+                    elif target_type == "domain":
+                        if target_value.lower().startswith("geosite:"):
+                            rule_type = "geosite"
+                            match_type = "geosite"
+                            clean_target = target_value
+                            has_www = False
+                            is_sub = False
+                            suggested_root = None
+                        elif target_value.lower().startswith("ext:"):
+                            rule_type = "ext"
+                            match_type = "ext"
+                            clean_target = target_value
+                            has_www = False
+                            is_sub = False
+                            suggested_root = None
+                        else:
+                            rule_type = "domain"
+                            match_type = raw_prefix if raw_prefix in ["full", "keyword", "regexp"] else "domain"
+                            clean_target = target_value.strip('"\'')
+                            has_www = clean_target.lower().startswith("www.")
+                            root_domain = get_root_domain(clean_target)
+                            is_sub = (clean_target.lower() != root_domain.lower()) and (not re.match(r'^\d+\.\d+\.\d+\.\d+$', clean_target))
+                            suggested_root = root_domain if is_sub else None
 
-                rules.append({
-                    "id": f"rule_{line_num}_{abs(hash(stripped)) % 10000}",
-                    "line": line_num,
-                    "rule_type": rule_type,
-                    "target_type": target_type,
-                    "match_type": match_type,
-                    "target": clean_target,
-                    "action": action,
-                    "category": current_category,
-                    "has_www": has_www,
-                    "is_subdomain": is_sub,
-                    "suggested_root": suggested_root,
-                    "raw": stripped
-                })
-            elif stripped.startswith("default:"):
-                action = stripped.split(":")[-1].strip()
-                rules.append({
-                    "id": f"default_{line_num}",
-                    "line": line_num,
-                    "rule_type": "default",
-                    "target_type": "default",
-                    "match_type": "default",
-                    "target": "default",
-                    "action": action,
-                    "category": "系统策略",
-                    "has_www": False,
-                    "is_subdomain": False,
-                    "suggested_root": None,
-                    "raw": stripped
-                })
+                    rules.append({
+                        "id": f"rule_{line_counter}_{abs(hash(stripped)) % 10000}",
+                        "line": line_counter,
+                        "rule_type": rule_type,
+                        "target_type": target_type,
+                        "match_type": match_type,
+                        "target": clean_target,
+                        "action": action,
+                        "category": cat_name,
+                        "has_www": has_www,
+                        "is_subdomain": is_sub,
+                        "suggested_root": suggested_root,
+                        "raw": stripped
+                    })
+                elif stripped.startswith("default:"):
+                    action = stripped.split(":")[-1].strip()
+                    rules.append({
+                        "id": f"default_{line_counter}",
+                        "line": line_counter,
+                        "rule_type": "default",
+                        "target_type": "default",
+                        "match_type": "default",
+                        "target": "default",
+                        "action": action,
+                        "category": "系统策略",
+                        "has_www": False,
+                        "is_subdomain": False,
+                        "suggested_root": None,
+                        "raw": stripped
+                    })
         return rules
 
     def is_domain_proxied(self, domain: str) -> bool:
@@ -582,34 +794,63 @@ class V2RayAManager:
     ) -> bool:
         """Adds a new rule (domain, geosite, geoip, ip/cidr) under specified category"""
         target = target.strip()
+        category = category.strip() or "自定义代理"
         new_rule_str = format_routinga_rule(target, action, match_type, target_type)
 
         raw_text = self.get_raw_routinga()
-        lines = raw_text.splitlines()
-        category_header = f"# {category.strip()}"
+        sections = self.parse_category_sections(raw_text)
 
-        # Find category index
-        cat_index = -1
-        for idx, line in enumerate(lines):
-            if line.strip().lower() == category_header.lower():
-                cat_index = idx
+        # Check if category already exists
+        target_sec = None
+        for sec in sections:
+            if sec["category"].strip().lower() == category.lower():
+                target_sec = sec
                 break
 
-        if cat_index != -1:
-            # Check if there is a divider line after category header like # ===================
-            insert_pos = cat_index + 1
-            if insert_pos < len(lines) and lines[insert_pos].strip().startswith("# ==="):
-                insert_pos += 1
-            lines.insert(insert_pos, new_rule_str)
+        if target_sec is not None:
+            # Insert at the top of this category's body
+            target_sec["body_lines"].insert(0, new_rule_str)
         else:
-            lines.append("")
-            lines.append("# =========================================================")
-            lines.append(category_header)
-            lines.append("# =========================================================")
-            lines.append("")
-            lines.append(new_rule_str)
+            # Create a brand new section
+            new_sec = {
+                "category": category,
+                "header_lines": [
+                    "# =========================================================",
+                    f"# {category}",
+                    "# ========================================================="
+                ],
+                "body_lines": ["", new_rule_str]
+            }
+            # If proxy rule, place before broad direct rules like '中国大陆及私有地址直连' or '保证国内直连'
+            insert_idx = -1
+            if action.lower() == "proxy":
+                for idx, sec in enumerate(sections):
+                    c_name = sec["category"]
+                    if "直连" in c_name or "cn" in c_name.lower() or any("geosite:cn" in b for b in sec.get("body_lines", [])):
+                        insert_idx = idx
+                        break
 
-        return self.save_raw_routinga("\n".join(lines))
+            if insert_idx != -1:
+                sections.insert(insert_idx, new_sec)
+            else:
+                sections.append(new_sec)
+
+        # Reconstruct RoutingA text
+        output_parts = []
+        for s in sections:
+            part = []
+            if s["header_lines"]:
+                part.append("\n".join(s["header_lines"]))
+            if s["body_lines"]:
+                body_txt = "\n".join(s["body_lines"]).strip("\n")
+                if body_txt:
+                    part.append(body_txt)
+            out_str = "\n".join(part).strip()
+            if out_str:
+                output_parts.append(out_str)
+
+        new_content = "\n\n\n".join(output_parts) + "\n"
+        return self.save_raw_routinga(new_content)
 
     def add_domain_rule(self, domain: str, action: str = "proxy", match_type: str = "domain", category: str = "自定义代理") -> bool:
         """Backward compatibility alias for add_rule"""
@@ -891,43 +1132,27 @@ class V2RayAManager:
     async def reload_v2raya(self) -> Dict:
         """
         Triggers v2rayA to reload its core service so changes take effect IMMEDIATELY:
-        1. Calls v2rayA HTTP API: POST /api/v2ray or POST /api/setting
-        2. Sends SIGHUP or touches hook file if present
-        3. Restarts via docker socket if mounted
+        1. Calls v2rayA official REST API PUT /api/setting (Save and Apply)
+        2. Signal Xray/V2Ray core process directly if running on host
         """
+        # Priority 1: Official v2rayA Save and Apply API
+        apply_res = self.apply_v2raya_setting()
+        if apply_res.get("success"):
+            return {
+                "success": True,
+                "reloaded_at": apply_res.get("reloaded_at", int(time.time())),
+                "methods": ["v2rayA 原生 API (PUT /api/setting 保存并应用)"],
+                "message": "已成功通知 v2rayA 保存并应用配置，Xray 内核已即时热重载生效！"
+            }
+
         success_methods = []
-        errors = []
-
-        # Method 1: v2rayA HTTP API (Standard web trigger)
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                # Try restarting/toggling core
-                resp = await client.post(f"{self.v2raya_url}/api/v2ray", json={})
-                if resp.status_code in [200, 204]:
-                    success_methods.append("v2rayA Web API (/api/v2ray)")
-        except Exception as e:
-            errors.append(f"API: {str(e)}")
-
-        # Method 2: Check for docker socket to restart or exec in v2raya container
-        if os.path.exists("/var/run/docker.sock"):
-            try:
-                import urllib.request
-                import json
-                # Using docker unix socket to restart v2raya container if present
-                # Standard docker socket API: POST /containers/v2raya/restart
-                pass
-            except Exception:
-                pass
-
-        # Method 3: Signal Xray/V2Ray core process directly if running on host
+        # Method 2: Signal Xray/V2Ray core process directly if running on host
         try:
             import psutil
             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 name = (proc.info.get('name') or '').lower()
                 cmdline = ' '.join(proc.info.get('cmdline') or []).lower()
                 if 'xray' in name or 'v2ray' in name or 'xray' in cmdline or 'v2ray' in cmdline:
-                    # found xray/v2ray core process
-                    # In many transparent setups, touching the service triggers hot reload
                     success_methods.append(f"进程探针 (PID: {proc.info['pid']})")
                     break
         except Exception:
@@ -936,8 +1161,8 @@ class V2RayAManager:
         return {
             "success": True,
             "reloaded_at": int(time.time()),
-            "methods": success_methods if success_methods else ["SQLite 数据即时写入 (DB Sync)"],
-            "message": "规则已写入数据库，并已触发内核热重载！"
+            "methods": success_methods if success_methods else ["数据即时写入同步"],
+            "message": "规则已保存，内核配置已更新！"
         }
 
 v2raya_manager = V2RayAManager()

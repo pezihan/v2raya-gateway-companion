@@ -13,11 +13,11 @@ def resolve_auth_password() -> str:
         if arg.startswith("--password="):
             return arg.split("=", 1)[1]
     # 3. Environment variables
-    for k in ("AUTH_PASSWORD", "PASSWORD", "APP_PASSWORD"):
+    for k in ("AUTH_PASSWORD", "PASSWORD", "APP_PASSWORD", "V2RAYA_PASSWORD"):
         if k in os.environ:
             return os.environ[k]
-    # 4. Default as requested by user
-    return "433127"
+    # 4. Default: empty string (disabled or set via environment)
+    return ""
 
 class Settings(BaseModel):
     HOST: str = os.getenv("HOST", "0.0.0.0")

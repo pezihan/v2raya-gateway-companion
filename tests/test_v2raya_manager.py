@@ -358,5 +358,53 @@ ip(geoip:private, geoip:cn) -> direct
     assert "domain(full:telegram.org) -> proxy" not in raw_after_del
     assert "domain(domain:telegram.org) -> proxy" in raw_after_del
 
+def test_category_sections_and_reordering(tmp_path):
+    conf_file = tmp_path / "routinga.conf"
+    conf_file.write_text("""# =========================================================
+# 默认规则
+# =========================================================
+default: direct
+
+# =========================================================
+# 中国大陆及私有地址直连
+# =========================================================
+domain(geosite:cn) -> direct
+
+# =========================================================
+# 自定义代理
+# =========================================================
+domain(domain:ip138.com) -> proxy
+""", encoding="utf-8")
+
+    mgr = V2RayAManager()
+    mgr.backup_path = str(conf_file)
+    mgr.db_path = "/nonexistent/path/db.sqlite"
+
+    # 1. Test get_ordered_categories
+    cats = mgr.get_ordered_categories()
+    assert cats == ["中国大陆及私有地址直连", "自定义代理"]
+
+    # 2. Test reorder_categories: Move '自定义代理' to the very top (right below default: direct)
+    success = mgr.reorder_categories(["自定义代理", "中国大陆及私有地址直连"])
+    assert success is True
+
+    # 3. Verify in raw file that '自定义代理' is now physically before '中国大陆及私有地址直连'
+    raw = mgr.get_raw_routinga()
+    idx_proxy = raw.find("自定义代理")
+    idx_direct = raw.find("中国大陆及私有地址直连")
+    assert idx_proxy < idx_direct
+    assert "default: direct" in raw
+
+    # 4. Verify ordered categories now reflects the new order
+    new_cats = mgr.get_ordered_categories()
+    assert new_cats == ["自定义代理", "中国大陆及私有地址直连"]
+
+    # 5. Verify rules parsed respect the category
+    rules = mgr.parse_rules()
+    ip138_rule = next(r for r in rules if r["target"] == "ip138.com")
+    assert ip138_rule["category"] == "自定义代理"
+    assert ip138_rule["action"] == "proxy"
+
+
 
 

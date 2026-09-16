@@ -8,7 +8,7 @@ echo "======================================================="
 echo "   v2rayA 旁路网关智能分流助手 (Gateway Companion)    "
 echo "======================================================="
 
-export AUTH_PASSWORD="${AUTH_PASSWORD:-433127}"
+export AUTH_PASSWORD="${AUTH_PASSWORD:-}"
 MODE="${1:-docker}"
 
 if [ "$MODE" = "local" ] || [ "$MODE" = "python" ]; then

@@ -215,12 +215,15 @@
                   （当前已是一级根域名）
                 </div>
 
-                <div class="flex items-center space-x-2 ml-auto">
-                  <button v-if="item.is_subdomain" @click="addRule(item.suggested_root, 'proxy', 'domain')" 
+                <div class="flex flex-wrap items-center space-x-2 ml-auto gap-1.5">
+                  <select v-model="snifferCategory" class="bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200">
+                    <option v-for="cat in availableCategories" :key="cat" :value="cat">📁 {{ cat }}</option>
+                  </select>
+                  <button v-if="item.is_subdomain" @click="addRule(item.suggested_root, 'proxy', 'domain', snifferCategory)" 
                     class="px-3.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs shadow-md shadow-brand-500/20 transition-all">
-                    + 保存根域名到代理
+                    + 保存根域名
                   </button>
-                  <button @click="addRule(item.domain, 'proxy', item.is_subdomain ? 'full' : 'domain')" 
+                  <button @click="addRule(item.domain, 'proxy', item.is_subdomain ? 'full' : 'domain', snifferCategory)" 
                     class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs transition-all">
                     {{ item.is_subdomain ? '+ 仅该子域名' : '+ 加入代理' }}
                   </button>
@@ -296,15 +299,45 @@
                 <div class="text-slate-400">详细分析: {{ manualProbe.summary }}</div>
               </div>
 
+              <!-- Mandatory Category Selector for Smart Add -->
+              <div class="border-t border-slate-800/80 pt-3 space-y-2">
+                <div class="flex items-center justify-between">
+                  <label class="block text-xs font-semibold text-slate-200">
+                    <span class="text-rose-400 font-bold">*</span> 规则归属分类 (Category) <span class="text-slate-400 text-[11px] font-normal">（必选，决定 RoutingA 匹配优先级）</span>:
+                  </label>
+                  <button type="button" @click="toggleManualCategoryMode" class="text-[11px] text-brand-400 hover:text-brand-300 transition-colors font-medium">
+                    <span v-if="manualCategoryMode === 'select'">➕ 新建分类</span>
+                    <span v-else>📋 选择已有分类</span>
+                  </button>
+                </div>
+
+                <div v-if="manualCategoryMode === 'select'">
+                  <select v-model="manualCategory" 
+                    class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <option value="">-- 请选择归属分类 (必选) --</option>
+                    <option v-for="cat in availableCategories" :key="cat" :value="cat">
+                      📁 {{ cat }}
+                    </option>
+                    <option value="__NEW_CATEGORY__">➕ 添加新分类...</option>
+                  </select>
+                </div>
+                <div v-else class="space-y-1">
+                  <input v-model="manualNewCategory" type="text" placeholder="输入新分类名称，例: 自定义代理、海外办公专线" 
+                    class="w-full bg-slate-900 border border-brand-500/80 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none">
+                  <p class="text-[10px] text-slate-400">将创建新分类标题并在 RoutingA 顶部分区中优先匹配</p>
+                </div>
+              </div>
+
               <div class="pt-2 flex items-center justify-end space-x-3">
                 <select v-model="manualAction" class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200">
                   <option value="proxy">动作: Proxy (代理)</option>
                   <option value="direct">动作: Direct (直连)</option>
                   <option value="block">动作: Block (拦截)</option>
                 </select>
-                <button @click="addManualRule" 
-                  class="px-5 py-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-400 text-white font-medium text-xs shadow-lg shadow-brand-500/20 transition-all">
-                  + 添加并写入 v2rayA
+                <button @click="addManualRule" :disabled="isAddingManual"
+                  class="px-5 py-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-400 text-white font-medium text-xs shadow-lg shadow-brand-500/20 transition-all flex items-center space-x-1.5">
+                  <span v-if="isAddingManual" class="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                  <span>+ 添加并写入 v2rayA</span>
                 </button>
               </div>
             </div>
@@ -347,19 +380,23 @@
             </button>
 
             <!-- Manual Reload Button -->
-            <button @click="triggerReload" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-medium transition-all flex items-center space-x-1" title="立即通知 v2rayA 重载内核生效">
-              <svg class="w-3.5 h-3.5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <button @click="triggerReload" :disabled="isReloading" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-medium transition-all flex items-center space-x-1" title="立即通知 v2rayA 重载内核生效">
+              <svg v-if="isReloading" class="animate-spin h-3.5 w-3.5 text-amber-400" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <svg v-else class="w-3.5 h-3.5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
               </svg>
-              <span>立即重载生效</span>
+              <span>{{ isReloading ? '正在重载应用...' : '立即重载生效' }}</span>
             </button>
 
             <!-- Sync from v2rayA Button -->
-            <button @click="syncFromV2rayA" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-medium transition-all flex items-center space-x-1" title="从宿主机 v2rayA 重新拉取最新规则">
-              <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <button @click="syncFromV2rayA" :disabled="isSyncing" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-medium transition-all flex items-center space-x-1" title="从宿主机 v2rayA 重新拉取最新规则">
+              <svg :class="isSyncing ? 'animate-spin' : ''" class="w-3.5 h-3.5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
               </svg>
-              <span>从 v2rayA 同步</span>
+              <span>{{ isSyncing ? '正在拉取...' : '从 v2rayA 同步' }}</span>
             </button>
 
             <!-- Toggle Raw Editor -->
@@ -401,16 +438,63 @@
           <textarea v-model="rawContent" rows="18" class="w-full font-mono text-xs bg-slate-950 border border-slate-800 rounded-xl p-4 text-slate-200 focus:outline-none focus:border-brand-500"></textarea>
         </div>
 
-        <!-- Visual Rules Cards View -->
+        <!-- Skeleton Shimmer Loading State -->
+        <div v-else-if="loadingRules" class="space-y-6">
+          <div v-for="i in 3" :key="i" class="space-y-3">
+            <div class="flex items-center space-x-3">
+              <div class="h-6 w-36 rounded-lg skeleton-shimmer"></div>
+              <div class="h-5 w-12 rounded-full skeleton-shimmer"></div>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <div v-for="j in 3" :key="j" class="bg-slate-900/60 border border-slate-800/80 rounded-xl p-4 space-y-3">
+                <div class="flex justify-between items-start">
+                  <div class="space-y-2 flex-1 pr-2">
+                    <div class="h-4 w-3/4 rounded skeleton-shimmer"></div>
+                    <div class="h-3 w-1/3 rounded skeleton-shimmer"></div>
+                  </div>
+                  <div class="h-6 w-14 rounded-lg skeleton-shimmer"></div>
+                </div>
+                <div class="border-t border-slate-800/60 pt-2 flex justify-between items-center">
+                  <div class="h-3 w-24 rounded skeleton-shimmer"></div>
+                  <div class="h-3 w-12 rounded skeleton-shimmer"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Visual Rules Cards View (Ordered by Category Priority) -->
         <div v-else class="space-y-6">
-          <div v-for="(groupRules, category) in groupedRules" :key="category" class="space-y-3">
-            <div class="flex items-center space-x-2">
-              <span class="text-xs font-bold uppercase tracking-wider text-slate-400">{{ category }}</span>
-              <span class="px-2 py-0.5 rounded-full text-xs bg-slate-800 text-slate-400">{{ groupRules.length }}</span>
+          <div v-for="group in groupedCategoryList" :key="group.category" class="category-group space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2 bg-slate-900/50 px-3.5 py-2 rounded-xl border border-slate-800/60">
+              <div class="flex items-center space-x-2">
+                <span class="px-2 py-0.5 rounded-md text-[11px] font-mono font-bold"
+                  :class="group.priority === 1 ? 'bg-brand-500/20 text-brand-300 border border-brand-500/30 animate-soft-pulse' : 'bg-slate-800 text-slate-400 border border-slate-700/50'">
+                  #{{ group.priority }} {{ group.priority === 1 ? '(优先级最高)' : '' }}
+                </span>
+                <span class="text-xs font-bold uppercase tracking-wider text-slate-200">{{ group.category }}</span>
+                <span class="px-2 py-0.5 rounded-full text-[10px] bg-slate-800 text-slate-400">{{ group.rules.length }} 条规则</span>
+              </div>
+
+              <!-- Reorder Action Buttons -->
+              <div v-if="group.category !== '系统策略' && group.category !== '默认规则'" class="flex items-center space-x-1">
+                <button @click="reorderCategory(group.category, 'top')" :disabled="group.priority === 1"
+                  class="px-2 py-1 rounded bg-slate-800/90 hover:bg-brand-600 disabled:opacity-30 disabled:hover:bg-slate-800 text-slate-300 hover:text-white transition-all text-[11px] flex items-center space-x-0.5" title="置顶该分类（使该分类内的规则最先被匹配）">
+                  <span>🔝 置顶</span>
+                </button>
+                <button @click="reorderCategory(group.category, 'up')" :disabled="group.priority === 1"
+                  class="px-2 py-1 rounded bg-slate-800/90 hover:bg-brand-600 disabled:opacity-30 disabled:hover:bg-slate-800 text-slate-300 hover:text-white transition-all text-[11px]" title="上移分类（提高匹配优先级）">
+                  <span>⬆️ 上移</span>
+                </button>
+                <button @click="reorderCategory(group.category, 'down')" :disabled="group.priority >= totalSortedCategories"
+                  class="px-2 py-1 rounded bg-slate-800/90 hover:bg-brand-600 disabled:opacity-30 disabled:hover:bg-slate-800 text-slate-300 hover:text-white transition-all text-[11px]" title="下移分类（降低匹配优先级）">
+                  <span>⬇️ 下移</span>
+                </button>
+              </div>
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              <div v-for="rule in groupRules" :key="rule.id" class="bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 rounded-xl p-3.5 backdrop-blur-md flex flex-col justify-between group transition-all space-y-2.5">
+              <div v-for="rule in group.rules" :key="rule.id" class="bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 rounded-xl p-3.5 backdrop-blur-md flex flex-col justify-between group transition-all space-y-2.5">
                 
                 <div class="flex items-start justify-between">
                   <div class="space-y-1 overflow-hidden pr-2">
@@ -617,7 +701,9 @@
           <!-- Category Selection & Creation -->
           <div class="space-y-1.5">
             <div class="flex items-center justify-between">
-              <label class="block font-semibold text-slate-300">归属分类 (Category):</label>
+              <label class="block font-semibold text-slate-300">
+                <span class="text-rose-400 font-bold">*</span> 归属分类 (Category) <span class="text-slate-400 text-[11px] font-normal">（必选）</span>:
+              </label>
               <button type="button" @click="toggleCategoryMode" class="text-[11px] text-brand-400 hover:text-brand-300 transition-colors flex items-center space-x-1 font-medium">
                 <span v-if="modal.categoryMode === 'select'">➕ 创建新分类</span>
                 <span v-else>📋 选择已有分类</span>
