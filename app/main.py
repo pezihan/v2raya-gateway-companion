@@ -239,12 +239,10 @@ async def api_reorder_categories(req: CategoryReorderRequest):
     if not order:
         raise HTTPException(status_code=400, detail="分类排序列表不能为空")
     success = v2raya_manager.reorder_categories(order)
-    reload_res = await v2raya_manager.reload_v2raya()
-    await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
+    await ws_manager.broadcast({"type": "RULES_UPDATED"})
     return {
         "success": success,
-        "ordered_categories": v2raya_manager.get_ordered_categories(),
-        "reload": reload_res
+        "ordered_categories": v2raya_manager.get_ordered_categories()
     }
 
 @app.post("/api/rules/add")
@@ -289,21 +287,17 @@ async def add_rule(req: AddRuleRequest):
         category=category
     )
     
-    reload_res = await v2raya_manager.reload_v2raya()
-    
     await ws_manager.broadcast({
         "type": "RULES_UPDATED",
         "target": target,
-        "action": req.action,
-        "reload": reload_res
+        "action": req.action
     })
     
     return {
         "success": success,
         "target": target,
         "domain": target, # backward compat
-        "rule": format_routinga_rule(target, req.action, match_type, target_type),
-        "reload": reload_res
+        "rule": format_routinga_rule(target, req.action, match_type, target_type)
     }
 
 @app.post("/api/rules/update")
@@ -348,9 +342,8 @@ async def update_rule(req: UpdateRuleRequest):
         old_match_type=req.old_match_type,
         old_action=req.old_action
     )
-    reload_res = await v2raya_manager.reload_v2raya()
-    await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
-    return {"success": success, "new_target": new_target, "new_domain": new_target, "reload": reload_res}
+    await ws_manager.broadcast({"type": "RULES_UPDATED"})
+    return {"success": success, "new_target": new_target, "new_domain": new_target}
 
 @app.delete("/api/rules")
 async def delete_rule(
@@ -359,9 +352,8 @@ async def delete_rule(
     action: Optional[str] = None
 ):
     success = v2raya_manager.delete_rule(target=target, match_type=match_type, action=action)
-    reload_res = await v2raya_manager.reload_v2raya()
-    await ws_manager.broadcast({"type": "RULES_UPDATED", "reload": reload_res})
-    return {"success": success, "reload": reload_res}
+    await ws_manager.broadcast({"type": "RULES_UPDATED"})
+    return {"success": success}
 
 @app.get("/api/rules/audit")
 async def audit_rules():

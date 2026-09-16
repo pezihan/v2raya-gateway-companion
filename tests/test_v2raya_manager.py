@@ -405,6 +405,74 @@ domain(domain:ip138.com) -> proxy
     assert ip138_rule["category"] == "自定义代理"
     assert ip138_rule["action"] == "proxy"
 
+def test_update_rule_move_to_new_category_and_deduplication(tmp_path):
+    conf_file = tmp_path / "routinga.conf"
+    conf_file.write_text("""# =========================================================
+# 默认规则
+# =========================================================
+default: direct
+
+# =========================================================
+# 自定义需要代理的域名
+# =========================================================
+# Telegram
+domain(domain:telegram.org) -> proxy
+
+# =========================================================
+# 自定义代理
+# =========================================================
+domain(domain:ip138.com) -> proxy
+""", encoding="utf-8")
+
+    mgr = V2RayAManager()
+    mgr.backup_path = str(conf_file)
+    mgr.db_path = "/nonexistent/path/db.sqlite"
+
+    # 1. Update telegram.org and move to brand new category 'Telegram'
+    success = mgr.update_rule(
+        old_target="telegram.org",
+        new_target="telegram.org",
+        new_match_type="domain",
+        new_action="proxy",
+        new_category="Telegram",
+        target_type="domain"
+    )
+    assert success is True
+    raw = mgr.get_raw_routinga()
+    assert "# Telegram" in raw
+    
+    rules = mgr.parse_rules()
+    tg_rule = next(r for r in rules if r["target"] == "telegram.org")
+    assert tg_rule["category"] == "Telegram"
+
+    # 2. Update ip138.com to ip1138.com and ensure NO duplicates
+    success = mgr.update_rule(
+        old_target="ip138.com",
+        new_target="ip1138.com",
+        new_match_type="domain",
+        new_action="proxy",
+        new_category="自定义代理",
+        target_type="domain"
+    )
+    assert success is True
+
+    # 3. Simulate repeated click (same update request)
+    success2 = mgr.update_rule(
+        old_target="ip138.com",
+        new_target="ip1138.com",
+        new_match_type="domain",
+        new_action="proxy",
+        new_category="自定义代理",
+        target_type="domain"
+    )
+    assert success2 is True
+
+    # Verify ip1138.com appears EXACTLY ONCE
+    rules = mgr.parse_rules()
+    matches = [r for r in rules if r["target"] == "ip1138.com"]
+    assert len(matches) == 1
+    assert not any(r["target"] == "ip138.com" for r in rules)
+
 
 
 

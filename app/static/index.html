@@ -380,7 +380,10 @@
             </button>
 
             <!-- Manual Reload Button -->
-            <button @click="triggerReload" :disabled="isReloading" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-medium transition-all flex items-center space-x-1" title="立即通知 v2rayA 重载内核生效">
+            <button @click="triggerReload" :disabled="isReloading" 
+              class="px-3.5 py-2 rounded-xl text-xs font-medium transition-all flex items-center space-x-1.5 shadow-sm"
+              :class="isReloading ? 'bg-amber-600/25 border border-amber-500/40 text-amber-200 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700/60'"
+              title="立即通知 v2rayA 重新编译配置并热重启 Xray 内核">
               <svg v-if="isReloading" class="animate-spin h-3.5 w-3.5 text-amber-400" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -388,7 +391,7 @@
               <svg v-else class="w-3.5 h-3.5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
               </svg>
-              <span>{{ isReloading ? '正在重载应用...' : '立即重载生效' }}</span>
+              <span>{{ isReloading ? '正在重载内核应用 (约需数秒)...' : '⚡ 立即重载生效' }}</span>
             </button>
 
             <!-- Sync from v2rayA Button -->
@@ -736,8 +739,15 @@
           <button @click="modal.show = false" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium">
             取消
           </button>
-          <button @click="submitModal" class="px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-lg shadow-brand-500/25 transition-all">
-            💾 确认写入并同步至 v2rayA
+          <button @click="submitModal" :disabled="isSubmittingModal" 
+            class="px-5 py-2 rounded-xl text-white text-xs font-semibold shadow-lg shadow-brand-500/25 transition-all flex items-center space-x-1.5"
+            :class="isSubmittingModal ? 'bg-brand-600/60 cursor-not-allowed opacity-80' : 'bg-brand-600 hover:bg-brand-500'">
+            <svg v-if="isSubmittingModal" class="animate-spin h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span v-else>💾</span>
+            <span>{{ isSubmittingModal ? '正在同步至 v2rayA...' : '确认写入并同步至 v2rayA' }}</span>
           </button>
         </div>
       </div>

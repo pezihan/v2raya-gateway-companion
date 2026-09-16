@@ -68,6 +68,7 @@ createApp({
     const loadingRules = ref(false);
     const isReloading = ref(false);
     const isSyncing = ref(false);
+    const isSubmittingModal = ref(false);
     const orderedCategories = ref([]);
 
     // Sniffer tab default category
@@ -575,6 +576,8 @@ createApp({
         return;
       }
 
+      if (isSubmittingModal.value) return;
+      isSubmittingModal.value = true;
       try {
         if (modal.value.isEdit) {
           const res = await fetch('/api/rules/update', {
@@ -593,7 +596,7 @@ createApp({
           });
           const data = await res.json();
           if (data.success) {
-            showToast(`已成功修改规则并写回 v2rayA: ${data.new_target}`);
+            showToast(`已成功修改规则并同步至 v2rayA: ${data.new_target}`);
             modal.value.show = false;
             fetchRules();
           } else {
@@ -613,7 +616,7 @@ createApp({
           });
           const data = await res.json();
           if (data.success) {
-            showToast(`已成功写入 v2rayA: ${data.target}`);
+            showToast(`已成功写入并同步至 v2rayA: ${data.target}`);
             modal.value.show = false;
             fetchRules();
           } else {
@@ -622,6 +625,8 @@ createApp({
         }
       } catch (e) {
         showToast('保存规则失败', 'error');
+      } finally {
+        isSubmittingModal.value = false;
       }
     };
 
@@ -878,14 +883,20 @@ createApp({
     };
 
     const triggerReload = async () => {
+      if (isReloading.value) return;
       isReloading.value = true;
+      showToast('正在请求 v2rayA 重新编译配置并热重载 Xray 核心，约需 5~10 秒，请稍候...', 'info');
       try {
         const res = await fetch('/api/v2ray/reload', { method: 'POST' });
         const data = await res.json();
-        showToast(data.message || '已成功通知 v2rayA 重载内核生效！');
+        if (data.success) {
+          showToast(data.message || '🎉 v2rayA 内核配置重载成功，已即时生效！');
+        } else {
+          showToast(data.message || '重载未能完全生效', 'error');
+        }
         fetchRules();
       } catch (e) {
-        showToast('重载请求失败', 'error');
+        showToast('重载请求失败，请检查网络或后端状态', 'error');
       } finally {
         isReloading.value = false;
       }
@@ -1106,6 +1117,7 @@ createApp({
       loadingRules,
       isReloading,
       isSyncing,
+      isSubmittingModal,
       orderedCategories,
       snifferCategory,
       reorderCategory,

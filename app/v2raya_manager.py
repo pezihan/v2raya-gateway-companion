@@ -510,7 +510,7 @@ class V2RayAManager:
         return DEFAULT_ROUTINGA_TEMPLATE
 
     def save_raw_routinga(self, content: str) -> bool:
-        """Saves raw RoutingA string to API, DB & file, and hot-applies to v2rayA"""
+        """Saves raw RoutingA string to API, DB & file, without triggering slow kernel reload"""
         self._cached_content = content
         # Save to backup file
         with open(self.backup_path, "w", encoding="utf-8") as f:
@@ -522,8 +522,8 @@ class V2RayAManager:
         # Priority 2: SQLite write if SQLite exists
         self._save_to_sqlite(content)
 
-        # Priority 3: Trigger v2rayA official '保存并应用' so config.json is rebuilt and core reloads
-        self.apply_v2raya_setting()
+        # Note: Do NOT call self.apply_v2raya_setting() here; 
+        # kernel restart is only triggered when user clicks '立即重载生效'.
 
         # Update recorded mtimes so our own write doesn't trigger false external detection
         self._update_recorded_mtimes()
@@ -808,6 +808,9 @@ class V2RayAManager:
                 break
 
         if target_sec is not None:
+            # Prevent duplicate rule insertion
+            if any(new_rule_str.strip() == l.strip() for l in target_sec.get("body_lines", [])):
+                return True
             # Insert at the top of this category's body
             target_sec["body_lines"].insert(0, new_rule_str)
         else:
@@ -869,7 +872,8 @@ class V2RayAManager:
     ) -> bool:
         """
         Updates an existing rule:
-        Modifies target, match_type, action, or moves category.
+        Accurately finds rule in its parsed category section,
+        modifies target/action/match_type or moves it to a new category (creating category banner if needed).
         """
         old_clean_target = old_target.strip('"\'')
         old_clean = re.sub(r'\s*,\s*', ',', old_clean_target.lower().strip())
@@ -883,66 +887,139 @@ class V2RayAManager:
                 target_type = "domain"
 
         new_rule_str = format_routinga_rule(new_clean, new_action, new_match_type, target_type)
-        
         raw_text = self.get_raw_routinga()
-        lines = raw_text.splitlines()
+        sections = self.parse_category_sections(raw_text)
 
-        # Find line index and its category
-        old_line_idx = -1
-        current_rule_cat = "默认分类"
+        rule_regex = re.compile(r'^(domain|ip)\((domain|full|keyword|regexp)?:?([^)]+)\)\s*->\s*(proxy|direct|block)$', re.IGNORECASE)
 
-        # Pass 1: Strict match with old_match_type and old_action if given
-        for idx, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if "->" in stripped:
-                line_normalized = re.sub(r'\s*,\s*', ',', stripped.lower())
-                if old_clean in line_normalized:
-                    match_ok = True
+        found_sec_idx = -1
+        found_line_idx = -1
+
+        # Pass 1: Accurate search within category sections
+        for s_idx, sec in enumerate(sections):
+            for l_idx, line in enumerate(sec.get("body_lines", [])):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                match = rule_regex.match(stripped)
+                if match:
+                    t_val = match.group(3).strip().strip('"\'').lower()
+                    t_prefix = (match.group(2) or "").lower()
+                    t_act = match.group(4).lower()
+
+                    target_ok = (t_val == old_clean or old_clean in t_val)
+                    type_ok = True
                     if old_match_type:
                         if old_match_type in ["full", "keyword", "regexp"]:
-                            match_ok = f"{old_match_type}:{old_clean}" in line_normalized
+                            type_ok = (t_prefix == old_match_type.lower())
                         elif old_match_type == "domain":
-                            match_ok = f"domain:{old_clean}" in line_normalized or f"({old_clean})" in line_normalized
+                            type_ok = (t_prefix in ["", "domain"])
                     action_ok = True
                     if old_action:
-                        action_ok = line_normalized.endswith(f"-> {old_action.lower()}") or line_normalized.endswith(f"->{old_action.lower()}")
-                    if match_ok and action_ok:
-                        old_line_idx = idx
+                        action_ok = (t_act == old_action.lower())
+
+                    if target_ok and type_ok and action_ok:
+                        found_sec_idx = s_idx
+                        found_line_idx = l_idx
                         break
-
-        # Pass 2: Fallback to loose match
-        if old_line_idx == -1:
-            for idx, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    continue
-                if "->" in stripped:
-                    line_normalized = re.sub(r'\s*,\s*', ',', stripped.lower())
-                    if old_clean in line_normalized or old_target.lower() in stripped.lower():
-                        old_line_idx = idx
-                        break
-
-        if old_line_idx == -1:
-            # Fallback: add rule
-            return self.add_rule(new_clean, new_action, new_match_type, target_type, new_category or "自定义代理")
-
-        # Determine category of old_line_idx
-        for idx in range(old_line_idx - 1, -1, -1):
-            s = lines[idx].strip()
-            if s.startswith("#") and not s.startswith("# ==="):
-                current_rule_cat = s.lstrip("# \t")
+            if found_sec_idx != -1:
                 break
 
-        # If new_category is specified and different from current category, remove old and insert into new
-        if new_category and new_category.strip().lower() != current_rule_cat.strip().lower():
-            lines.pop(old_line_idx)
-            self.save_raw_routinga("\n".join(lines))
-            return self.add_rule(new_clean, new_action, new_match_type, target_type, new_category)
+        # Pass 2: Fallback loose match
+        if found_sec_idx == -1:
+            for s_idx, sec in enumerate(sections):
+                for l_idx, line in enumerate(sec.get("body_lines", [])):
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    if old_clean in stripped.lower():
+                        found_sec_idx = s_idx
+                        found_line_idx = l_idx
+                        break
+                if found_sec_idx != -1:
+                    break
+
+        if found_sec_idx != -1:
+            from_sec = sections[found_sec_idx]
+            current_cat = from_sec["category"]
+            target_cat = (new_category or current_cat).strip()
+
+            if target_cat.lower() == current_cat.lower():
+                # Same category: replace line in place
+                from_sec["body_lines"][found_line_idx] = new_rule_str
+            else:
+                # Move to a different (or new) category
+                from_sec["body_lines"].pop(found_line_idx)
+                
+                # Check if target category already exists in sections
+                target_sec = None
+                for sec in sections:
+                    if sec["category"].strip().lower() == target_cat.lower():
+                        target_sec = sec
+                        break
+
+                if target_sec is not None:
+                    target_sec.setdefault("body_lines", []).insert(0, new_rule_str)
+                else:
+                    # Create brand new category section!
+                    new_sec = {
+                        "category": target_cat,
+                        "header_lines": [
+                            "# =========================================================",
+                            f"# {target_cat}",
+                            "# ========================================================="
+                        ],
+                        "body_lines": ["", new_rule_str]
+                    }
+                    insert_idx = -1
+                    if new_action.lower() == "proxy":
+                        for idx, sec in enumerate(sections):
+                            c_name = sec["category"]
+                            if "直连" in c_name or "cn" in c_name.lower() or any("geosite:cn" in b for b in sec.get("body_lines", [])):
+                                insert_idx = idx
+                                break
+                    if insert_idx != -1:
+                        sections.insert(insert_idx, new_sec)
+                    else:
+                        sections.append(new_sec)
         else:
-            lines[old_line_idx] = new_rule_str
-            return self.save_raw_routinga("\n".join(lines))
+            # Old rule wasn't found. Check if new_rule_str already exists (idempotent / prevent duplicate click)
+            for sec in sections:
+                if any(new_rule_str.strip() == l.strip() for l in sec.get("body_lines", [])):
+                    return True
+            # Otherwise add as new rule
+            return self.add_rule(new_clean, new_action, new_match_type, target_type, new_category or "自定义代理")
+
+        # Deduplicate rules within each category section to prevent duplicates
+        for sec in sections:
+            seen = set()
+            clean_body = []
+            for line in sec.get("body_lines", []):
+                s = line.strip()
+                if s and not s.startswith("#") and "->" in s:
+                    norm = re.sub(r'\s+', '', s.lower())
+                    if norm in seen:
+                        continue
+                    seen.add(norm)
+                clean_body.append(line)
+            sec["body_lines"] = clean_body
+
+        # Reconstruct text
+        output_parts = []
+        for s in sections:
+            part = []
+            if s["header_lines"]:
+                part.append("\n".join(s["header_lines"]))
+            if s["body_lines"]:
+                body_txt = "\n".join(s["body_lines"]).strip("\n")
+                if body_txt:
+                    part.append(body_txt)
+            out_str = "\n".join(part).strip()
+            if out_str:
+                output_parts.append(out_str)
+
+        new_content = "\n\n\n".join(output_parts) + "\n"
+        return self.save_raw_routinga(new_content)
 
     def delete_rule(self, target: str, match_type: Optional[str] = None, action: Optional[str] = None) -> bool:
         """Deletes rule matching target, and optionally match_type and action"""
