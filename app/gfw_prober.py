@@ -7,6 +7,8 @@ import dns.resolver
 import httpx
 from app.config import settings
 
+import ipaddress
+
 # Common GFW DNS Poisoned Bogon / Fake IPs
 KNOWN_POISONED_IPS: Set[str] = {
     "127.0.0.1", "0.0.0.0", "10.10.34.34",
@@ -16,6 +18,52 @@ KNOWN_POISONED_IPS: Set[str] = {
     "209.145.54.50", "49.2.123.56", "54.251.179.9", "69.63.187.12",
     "69.171.224.11", "74.125.127.102", "118.97.106.230", "128.121.126.139"
 }
+
+# GFW Known Poisoned Subnets (e.g., Facebook AS32934 ranges, Twitter ranges injected by GFW)
+KNOWN_POISONED_NETWORKS = [
+    # Meta / Facebook
+    ipaddress.ip_network("157.240.0.0/16"),   # Facebook / Meta (e.g. 157.240.12.50)
+    ipaddress.ip_network("185.60.216.0/22"),  # Facebook (e.g. 185.60.216.11)
+    ipaddress.ip_network("69.63.176.0/20"),   # Facebook (e.g. 69.63.181.12)
+    ipaddress.ip_network("69.171.224.0/19"),  # Facebook
+    ipaddress.ip_network("31.13.64.0/18"),    # Facebook
+    ipaddress.ip_network("66.220.144.0/20"),  # Facebook
+    # Twitter / X
+    ipaddress.ip_network("104.244.40.0/21"),  # Twitter (e.g. 104.244.46.5)
+    ipaddress.ip_network("199.59.148.0/22"),  # Twitter
+    ipaddress.ip_network("199.16.156.0/22"),  # Twitter
+    # Historically injected subnets
+    ipaddress.ip_network("37.61.54.0/24"),
+    ipaddress.ip_network("46.82.174.0/24"),
+    ipaddress.ip_network("59.24.3.0/24"),
+    ipaddress.ip_network("74.125.127.0/24"),
+    ipaddress.ip_network("78.16.49.0/24"),
+    ipaddress.ip_network("93.46.8.0/24"),
+    ipaddress.ip_network("128.121.126.0/24"),
+    ipaddress.ip_network("159.106.121.0/24"),
+    ipaddress.ip_network("203.98.7.0/24"),
+    ipaddress.ip_network("243.185.187.0/24"),
+    ipaddress.ip_network("49.2.123.0/24"),
+    ipaddress.ip_network("216.234.179.0/24"),
+    ipaddress.ip_network("209.145.54.0/24"),
+    ipaddress.ip_network("118.97.106.0/24"),
+    ipaddress.ip_network("202.181.7.0/24"),
+    ipaddress.ip_network("202.106.1.0/24"),
+]
+
+def is_ip_poisoned(ip_str: str) -> bool:
+    if ip_str in KNOWN_POISONED_IPS:
+        return True
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        if ip.is_private or ip.is_loopback or ip.is_unspecified or ip.is_reserved:
+            return True
+        for net in KNOWN_POISONED_NETWORKS:
+            if ip in net:
+                return True
+    except Exception:
+        pass
+    return False
 
 # Cache results for 300 seconds to prevent hammering
 _probe_cache: Dict[str, Dict] = {}
@@ -42,35 +90,43 @@ class GFWProber:
         return await loop.run_in_executor(None, _sync_resolve)
 
     async def _resolve_overseas_doh(self, domain: str) -> Optional[Set[str]]:
-        """Resolves A records via Overseas DoH (Cloudflare 1.1.1.1 / Google)"""
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.get(
-                    "https://1.1.1.1/dns-query",
-                    params={"name": domain, "type": "A"},
-                    headers={"accept": "application/dns-json"}
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    answers = data.get("Answer", [])
-                    return {ans["data"] for ans in answers if ans.get("type") == 1}
-        except Exception:
-            pass
+        """Resolves A records via Overseas DoH (dns.google / Cloudflare)"""
+        endpoints = [
+            ("https://dns.google/resolve", {"name": domain, "type": "A"}),
+            ("https://1.1.1.1/dns-query", {"name": domain, "type": "A"}),
+            ("https://cloudflare-dns.com/dns-query", {"name": domain, "type": "A"}),
+        ]
+        headers = {"accept": "application/dns-json"}
+        for url, params in endpoints:
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    resp = await client.get(url, params=params, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        answers = data.get("Answer", [])
+                        ips = {ans["data"] for ans in answers if ans.get("type") == 1}
+                        if ips:
+                            return ips
+            except Exception:
+                continue
         return set()
 
-    async def _probe_tcp_port(self, ip: str, port: int) -> bool:
-        """Helper to check if a specific TCP port is open and connectable"""
+    async def _probe_http_alive(self, domain: str, ip: str) -> bool:
+        """Checks if a host actually responds with valid HTTP response data on port 80"""
         loop = asyncio.get_running_loop()
-        def _sync_port_check():
+        def _sync_http_check():
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(min(self.timeout, 2.0))
-                s.connect((ip, port))
+                s.settimeout(min(self.timeout, 2.5))
+                s.connect((ip, 80))
+                req = f"HEAD / HTTP/1.1\r\nHost: {domain}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n".encode("utf-8")
+                s.sendall(req)
+                data = s.recv(256)
                 s.close()
-                return True
+                return bool(data and data.startswith(b"HTTP/"))
             except Exception:
                 return False
-        return await loop.run_in_executor(None, _sync_port_check)
+        return await loop.run_in_executor(None, _sync_http_check)
 
     async def _probe_tcp_tls(self, domain: str, target_ip: Optional[str] = None) -> Dict:
         """
@@ -134,9 +190,9 @@ class GFWProber:
     async def check_domain(self, domain: str, force_refresh: bool = False) -> Dict:
         """
         Executes a comprehensive GFW blockage analysis:
-        1. DNS Poisoning check (known poisoned bogons / private IPs)
+        1. DNS Poisoning check (known poisoned bogons / private IPs / fake CIDRs)
         2. Direct TCP / TLS SNI probe (detects TCP RST)
-        3. Port 80 fallback for HTTP-only sites to prevent timeout false positives
+        3. Real HTTP fallback for HTTP-only sites to prevent timeout false positives
         """
         domain = domain.lower().strip()
         now = time.time()
@@ -154,25 +210,25 @@ class GFWProber:
         is_poisoned = False
         poison_reason = ""
 
-        # Check if domestic DNS returned known poisoned IPs
-        poisoned_intersection = dom_ips.intersection(KNOWN_POISONED_IPS)
-        if poisoned_intersection:
-            is_poisoned = True
-            poison_reason = f"国内DNS返回典型投毒虚假IP: {', '.join(poisoned_intersection)}"
-        else:
-            # Check for bogon / private IPs returned for public domains
-            for ip_str in dom_ips:
-                try:
-                    import ipaddress
-                    parsed_ip = ipaddress.ip_address(ip_str)
-                    if (parsed_ip.is_private or parsed_ip.is_loopback or parsed_ip.is_unspecified) and not domain.endswith((".local", ".lan", ".home.arpa")):
+        # 1. Check if domestic DNS returned known poisoned IPs or poisoned subnets
+        for ip_str in dom_ips:
+            if is_ip_poisoned(ip_str):
+                is_poisoned = True
+                poison_reason = f"国内DNS返回典型投毒/虚假IP: {ip_str}"
+                break
+
+        # 2. Check if domestic IPs and overseas IPs diverge completely (domestic returned fake overseas IP)
+        if not is_poisoned and dom_ips and overseas_ips:
+            if not dom_ips.intersection(overseas_ips):
+                # Overseas resolved to valid overseas CDN/host, but domestic resolved to completely different IPs
+                for ip_str in dom_ips:
+                    if is_ip_poisoned(ip_str):
                         is_poisoned = True
-                        poison_reason = f"国内DNS返回异常保留/私有IP: {ip_str}"
+                        poison_reason = f"国内DNS返回GFW典型投毒IP: {ip_str} (海外真实解析为: {', '.join(list(overseas_ips)[:2])})"
                         break
-                except Exception:
-                    pass
 
         # Probe TCP / TLS directly
+        # Prefer overseas real IP to detect SNI RST; if no overseas IP, probe domestic IP
         test_ip = list(overseas_ips)[0] if overseas_ips else (list(dom_ips)[0] if dom_ips else None)
         tls_result = await self._probe_tcp_tls(domain, test_ip)
 
@@ -192,19 +248,18 @@ class GFWProber:
             block_type = "TCP_RST"
             evidence_list.append(tls_result.get("error"))
         elif err_type == "TIMEOUT":
-            # If 443 timed out, check port 80 (HTTP) to see if site is just a non-HTTPS site
+            # If 443 timed out, check real HTTP response on port 80 to see if site is just a non-HTTPS site
             if test_ip:
-                http_accessible = await self._probe_tcp_port(test_ip, 80)
-                if http_accessible:
-                    # Site is reachable via port 80! NOT blocked by GFW!
+                http_alive = await self._probe_http_alive(domain, test_ip)
+                if http_alive:
+                    # Site is genuinely reachable via HTTP port 80!
                     tls_result["accessible"] = True
                     tls_result["latency_ms"] = tls_result.get("latency_ms") or 50
                     if not is_poisoned:
                         is_blocked = False
                 else:
-                    # Both 443 and 80 timed out
-                    # Only mark as GFW TIMEOUT if overseas DoH succeeded, indicating it's an active overseas host
-                    if overseas_ips and not is_poisoned:
+                    # Both 443 and 80 timed out / failed
+                    if (overseas_ips or is_poisoned) and not is_poisoned:
                         is_blocked = True
                         block_type = "TIMEOUT"
                         evidence_list.append("国内直连超时 (80/443端口均无响应，疑似黑洞丢包)")

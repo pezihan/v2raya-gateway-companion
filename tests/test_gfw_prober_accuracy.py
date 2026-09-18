@@ -42,7 +42,7 @@ def test_port_80_fallback_for_http_only_site():
         with patch.object(prober, "_resolve_domestic_dns", new_callable=AsyncMock) as mock_dom, \
              patch.object(prober, "_resolve_overseas_doh", new_callable=AsyncMock) as mock_overseas, \
              patch.object(prober, "_probe_tcp_tls", new_callable=AsyncMock) as mock_tls, \
-             patch.object(prober, "_probe_tcp_port", new_callable=AsyncMock) as mock_port:
+             patch.object(prober, "_probe_http_alive", new_callable=AsyncMock) as mock_http:
 
             mock_dom.return_value = {"112.80.248.75"}
             mock_overseas.return_value = {"112.80.248.75"}
@@ -51,7 +51,7 @@ def test_port_80_fallback_for_http_only_site():
                 "error_type": "TIMEOUT",
                 "error": "TCP 443 连接超时"
             }
-            mock_port.return_value = True
+            mock_http.return_value = True
 
             res = await prober.check_domain("http-only-site.example", force_refresh=True)
             assert res["is_blocked"] is False
@@ -100,3 +100,51 @@ def test_dns_poisoning_detected():
             assert res["block_type"] == "DNS_POISONED"
 
     asyncio.run(_run())
+
+def test_facebook_bogon_poisoning_detected():
+    """Verify that GFW Facebook bogon range (e.g. 69.63.181.12) is flagged as DNS_POISONED"""
+    prober = GFWProber()
+
+    async def _run():
+        with patch.object(prober, "_resolve_domestic_dns", new_callable=AsyncMock) as mock_dom, \
+             patch.object(prober, "_resolve_overseas_doh", new_callable=AsyncMock) as mock_overseas, \
+             patch.object(prober, "_probe_tcp_tls", new_callable=AsyncMock) as mock_tls:
+
+            mock_dom.return_value = {"69.63.181.12"}
+            mock_overseas.return_value = {"104.21.21.208"}
+            mock_tls.return_value = {"accessible": True, "latency_ms": 20, "error_type": None, "error": None}
+
+            res = await prober.check_domain("51cg1.com", force_refresh=True)
+            assert res["is_blocked"] is True
+            assert res["block_type"] == "DNS_POISONED"
+            assert "69.63.181.12" in res["summary"]
+
+    asyncio.run(_run())
+
+def test_twitter_bogon_and_sinkhole_poisoning_detected():
+    """Verify that Twitter bogon range (104.244.46.5) and sinkhole 0.0.0.0 are flagged as DNS_POISONED"""
+    prober = GFWProber()
+
+    async def _run():
+        with patch.object(prober, "_resolve_domestic_dns", new_callable=AsyncMock) as mock_dom, \
+             patch.object(prober, "_resolve_overseas_doh", new_callable=AsyncMock) as mock_overseas, \
+             patch.object(prober, "_probe_tcp_tls", new_callable=AsyncMock) as mock_tls:
+
+            # Test Twitter injected IP
+            mock_dom.return_value = {"104.244.46.5"}
+            mock_overseas.return_value = {"104.21.21.208"}
+            mock_tls.return_value = {"accessible": True, "latency_ms": 20, "error_type": None, "error": None}
+
+            res = await prober.check_domain("51cg1.com", force_refresh=True)
+            assert res["is_blocked"] is True
+            assert res["block_type"] == "DNS_POISONED"
+            assert "104.244.46.5" in res["summary"]
+
+            # Test 0.0.0.0 sinkhole
+            mock_dom.return_value = {"0.0.0.0"}
+            res2 = await prober.check_domain("51cg1.com", force_refresh=True)
+            assert res2["is_blocked"] is True
+            assert res2["block_type"] == "DNS_POISONED"
+
+    asyncio.run(_run())
+
