@@ -766,23 +766,80 @@ class V2RayAManager:
                     })
         return rules
 
-    def is_domain_proxied(self, domain: str) -> bool:
+    def parse_xray_access_log_line(self, line: str) -> Optional[Dict]:
         """
-        Checks if a domain is already matched by an existing 'proxy' rule.
+        Parses an Xray/v2ray-core access log entry.
+        Example:
+        2026/09/18 10:20:15 192.168.1.50:54321 accepted tcp:api.github.com:443 [proxy]
+        """
+        if not line or "accepted" not in line:
+            return None
+        m = re.search(
+            r'(?:\[?(?P<client_ip>\d+\.\d+\.\d+\.\d+):(?P<client_port>\d+)\]?\s+)?'
+            r'accepted\s+'
+            r'(?:(?P<protocol>tcp|udp):)?'
+            r'(?P<destination>[a-zA-Z0-9_.-]+):(?P<port>\d+)\s+'
+            r'\[(?P<outbound>[a-zA-Z0-9_-]+)\]',
+            line,
+            re.IGNORECASE
+        )
+        if m:
+            return {
+                "client_ip": m.group("client_ip"),
+                "client_port": int(m.group("client_port")) if m.group("client_port") else None,
+                "protocol": (m.group("protocol") or "tcp").lower(),
+                "destination": m.group("destination").lower(),
+                "port": int(m.group("port")),
+                "outbound": m.group("outbound").lower()
+            }
+        return None
+
+    def get_domain_route_action(self, domain: str) -> str:
+        """
+        Evaluates RoutingA rules against the given domain in sequential order.
+        Returns the routing action: 'proxy', 'direct', or 'block'.
+        Falls back to the configured 'default:' action (defaulting to 'direct').
         """
         rules = self.parse_rules()
-        domain = domain.lower().strip()
+        domain = domain.lower().strip(".")
+        default_action = "direct"
+
         for r in rules:
-            if r.get("target_type") == "domain" and r.get("action") == "proxy":
-                target = r.get("target", "").lower()
+            rule_type = r.get("rule_type")
+            action = r.get("action", "direct").lower()
+
+            if rule_type == "default":
+                default_action = action
+                continue
+
+            if r.get("target_type") == "domain":
+                raw_target = r.get("target", "")
                 match_type = r.get("match_type", "domain")
+
                 if match_type == "full":
-                    if target == domain:
-                        return True
+                    if domain == raw_target.lower().strip("."):
+                        return action
                 elif match_type == "domain":
+                    target = raw_target.lower().strip(".")
                     if domain == target or domain.endswith("." + target):
-                        return True
-        return False
+                        return action
+                elif match_type == "keyword":
+                    if raw_target.lower() in domain:
+                        return action
+                elif match_type == "regexp":
+                    try:
+                        if re.search(raw_target, domain, re.IGNORECASE):
+                            return action
+                    except Exception:
+                        pass
+
+        return default_action
+
+    def is_domain_proxied(self, domain: str) -> bool:
+        """
+        Checks if a domain is matched by an existing 'proxy' rule or default proxy action.
+        """
+        return self.get_domain_route_action(domain) == "proxy"
 
     def add_rule(
         self,

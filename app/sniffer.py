@@ -1,10 +1,25 @@
+import os
 import asyncio
 import time
 import re
 from typing import Optional, Dict, List, Set
+from app.config import settings
 from app.gfw_prober import prober
 from app.v2raya_manager import v2raya_manager
 from app.domain_utils import get_root_domain
+
+def _find_access_log_path() -> Optional[str]:
+    candidate_paths = [
+        getattr(settings, "V2RAYA_ACCESS_LOG", ""),
+        "/var/log/v2ray/access.log",
+        "/var/log/v2raya/access.log",
+        "/etc/v2raya/access.log",
+        "./data/access.log"
+    ]
+    for p in candidate_paths:
+        if p and os.path.exists(p) and os.path.isfile(p):
+            return p
+    return None
 
 # Helper to parse TLS SNI from raw TCP payload
 def extract_tls_sni(payload: bytes) -> Optional[str]:
@@ -62,6 +77,7 @@ class GatewayTrafficSniffer:
         self.detected_alerts: List[Dict] = []
         self.broadcast_callback = None
         self._sniffer_thread = None
+        self._log_tail_thread = None
 
     def set_broadcast_callback(self, callback):
         self.broadcast_callback = callback
@@ -88,11 +104,12 @@ class GatewayTrafficSniffer:
         self._recent_domains[domain] = now
 
         # Step 1: Check if already routed via proxy in v2rayA
-        if v2raya_manager.is_domain_proxied(domain):
-            # Already unblocked and routed through proxy -> ignore completely!
+        # 走了代理的就不管了 -> 立即返回丢弃
+        route_action = v2raya_manager.get_domain_route_action(domain)
+        if route_action == "proxy":
             return
 
-        # Step 2: Probe GFW blockage
+        # Step 2: For domains routed to 'direct' (直连), probe for true GFW blockage
         probe_res = await prober.check_domain(domain)
         if probe_res.get("is_blocked"):
             root = get_root_domain(domain)
@@ -123,9 +140,10 @@ class GatewayTrafficSniffer:
         self.start_time = time.time()
         self.is_running = True
 
-        # Start packet sniffer in background
         loop = asyncio.get_event_loop()
-        
+        import threading
+
+        # 1. Start packet sniffer in background (Scapy)
         def _run_scapy_sniffer():
             try:
                 from scapy.all import sniff, DNS, DNSQR, IP, TCP, UDP, Raw
@@ -166,15 +184,48 @@ class GatewayTrafficSniffer:
             except Exception as e:
                 print(f"[Sniffer Error] Scapy sniffing stopped or failed: {e}")
 
-        import threading
         self._sniffer_thread = threading.Thread(target=_run_scapy_sniffer, daemon=True)
         self._sniffer_thread.start()
+
+        # 2. Start v2rayA / Xray access log tailer if log file is available
+        access_log_path = _find_access_log_path()
+        if access_log_path:
+            def _run_log_tailer(log_path: str):
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                        f.seek(0, os.SEEK_END)
+                        while self.is_running:
+                            line = f.readline()
+                            if not line:
+                                time.sleep(0.5)
+                                continue
+                            parsed = v2raya_manager.parse_xray_access_log_line(line)
+                            if parsed:
+                                dest = parsed.get("destination")
+                                client_ip = parsed.get("client_ip")
+                                outbound = parsed.get("outbound")
+                                if self.target_ip and client_ip and client_ip != self.target_ip:
+                                    continue
+                                # If proxied -> ignore!
+                                if outbound == "proxy":
+                                    continue
+                                elif outbound == "direct" and dest:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.handle_observed_domain(dest, client_ip or self.target_ip or "gateway"),
+                                        loop
+                                    )
+                except Exception as e:
+                    print(f"[Log Tailer] Log tailer stopped: {e}")
+
+            self._log_tail_thread = threading.Thread(target=_run_log_tailer, args=(access_log_path,), daemon=True)
+            self._log_tail_thread.start()
 
         return {
             "success": True,
             "target_ip": self.target_ip,
             "duration_seconds": self.duration_seconds,
-            "status": "running"
+            "status": "running",
+            "access_log_attached": bool(access_log_path)
         }
 
     def stop(self) -> Dict:

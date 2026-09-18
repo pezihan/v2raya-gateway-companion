@@ -38,7 +38,8 @@ class Settings(BaseModel):
     OVERSEAS_DOH: str = os.getenv("OVERSEAS_DOH", "https://1.1.1.1/dns-query")
     PROBE_TIMEOUT: float = float(os.getenv("PROBE_TIMEOUT", "3.0"))
     
-    # Sniffing settings
+    # Sniffing & Logging settings
     SNIFF_INTERFACE: str = os.getenv("SNIFF_INTERFACE", "")  # empty means auto-detect
+    V2RAYA_ACCESS_LOG: str = os.getenv("V2RAYA_ACCESS_LOG", "")  # path to access.log if available
 
 settings = Settings()
